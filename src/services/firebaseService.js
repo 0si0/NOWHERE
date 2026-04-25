@@ -33,6 +33,7 @@ import {
 import {
   assertFirebaseConfigured,
   getFirebaseRuntimeStatus as getFirebaseRuntimeStatusFromClient,
+  isFirebaseConfigured as isFirebaseConfiguredInClient,
 } from './firebaseClient';
 import {
   buildUserProfileDocument,
@@ -43,6 +44,48 @@ import {
 } from './firebaseValidation';
 
 const SESSION_ID_KEY = '@nowhere/session-id';
+const LOCAL_APP_USER_ID_KEY = '@nowhere/local-app-user-id';
+const LOCAL_SAVED_PLACES_KEY = '@nowhere/local-saved-places';
+
+function getComparableTimestamp(value) {
+  if (!value) return 0;
+  if (typeof value?.toDate === 'function') {
+    return value.toDate().getTime();
+  }
+
+  const asDate = new Date(value);
+  return Number.isNaN(asDate.getTime()) ? 0 : asDate.getTime();
+}
+
+function sortByUpdatedAtDescending(items) {
+  return [...items].sort(
+    (left, right) => getComparableTimestamp(right.updatedAt) - getComparableTimestamp(left.updatedAt)
+  );
+}
+
+async function readLocalSavedPlaces() {
+  const raw = await AsyncStorage.getItem(LOCAL_SAVED_PLACES_KEY);
+
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    await AsyncStorage.removeItem(LOCAL_SAVED_PLACES_KEY);
+    return [];
+  }
+}
+
+async function writeLocalSavedPlaces(places) {
+  await AsyncStorage.setItem(LOCAL_SAVED_PLACES_KEY, JSON.stringify(places));
+}
+
+function buildLocalSavedPlaceId() {
+  return `local-place-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function getUserDocumentRef(db, userId) {
   return doc(db, 'users', userId);
@@ -138,9 +181,46 @@ export async function getOrCreateSessionId() {
   return nextValue;
 }
 
+export async function getOrCreateAppUserId() {
+  if (isFirebaseConfiguredInClient()) {
+    const { auth } = assertFirebaseConfigured();
+    if (auth.currentUser?.uid) {
+      return auth.currentUser.uid;
+    }
+  }
+
+  const existing = await AsyncStorage.getItem(LOCAL_APP_USER_ID_KEY);
+  if (existing) {
+    return existing;
+  }
+
+  const nextValue = `local-user-${Math.random().toString(36).slice(2, 10)}`;
+  await AsyncStorage.setItem(LOCAL_APP_USER_ID_KEY, nextValue);
+  return nextValue;
+}
+
 export async function saveSavedPlace(input) {
+  const resolvedUserId = input.userId || await getOrCreateAppUserId();
+  const sanitized = sanitizeSavedPlaceInput({
+    ...input,
+    userId: resolvedUserId,
+  });
+
+  if (!isFirebaseConfiguredInClient()) {
+    const savedPlaces = await readLocalSavedPlaces();
+    const now = new Date().toISOString();
+    const nextPlace = {
+      id: buildLocalSavedPlaceId(),
+      ...sanitized,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await writeLocalSavedPlaces([...savedPlaces, nextPlace]);
+    return nextPlace;
+  }
+
   const { auth, db } = assertFirebaseConfigured();
-  const sanitized = sanitizeSavedPlaceInput(input);
   const userId = assertAuthenticatedUser(auth, sanitized.userId);
   const docRef = doc(getSavedPlacesCollection(db, userId));
 
@@ -156,10 +236,19 @@ export async function saveSavedPlace(input) {
 }
 
 export async function getSavedPlaces(userId) {
+  const ownerId = userId || await getOrCreateAppUserId();
+
+  if (!isFirebaseConfiguredInClient()) {
+    const savedPlaces = await readLocalSavedPlaces();
+    return sortByUpdatedAtDescending(
+      savedPlaces.filter((item) => item.userId === ownerId)
+    );
+  }
+
   const { auth, db } = assertFirebaseConfigured();
-  const ownerId = assertAuthenticatedUser(auth, userId);
+  const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
   const placesQuery = query(
-    getSavedPlacesCollection(db, ownerId),
+    getSavedPlacesCollection(db, validatedOwnerId),
     orderBy('updatedAt', 'desc')
   );
   const snapshot = await getDocs(placesQuery);
@@ -171,8 +260,31 @@ export async function getSavedPlaces(userId) {
 }
 
 export async function updateSavedPlace(placeId, input) {
+  const resolvedUserId = input.userId || await getOrCreateAppUserId();
+  const sanitized = sanitizeSavedPlaceInput({
+    ...input,
+    userId: resolvedUserId,
+  });
+
+  if (!isFirebaseConfiguredInClient()) {
+    const savedPlaces = await readLocalSavedPlaces();
+    const nextPlaces = savedPlaces.map((item) => {
+      if (item.id !== placeId || item.userId !== sanitized.userId) {
+        return item;
+      }
+
+      return {
+        ...item,
+        ...sanitized,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    await writeLocalSavedPlaces(nextPlaces);
+    return nextPlaces.find((item) => item.id === placeId) || null;
+  }
+
   const { auth, db } = assertFirebaseConfigured();
-  const sanitized = sanitizeSavedPlaceInput(input);
   const userId = assertAuthenticatedUser(auth, sanitized.userId);
   const placeRef = doc(getSavedPlacesCollection(db, userId), placeId);
 
@@ -186,9 +298,29 @@ export async function updateSavedPlace(placeId, input) {
 }
 
 export async function archiveSavedPlace(userId, placeId) {
+  const ownerId = userId || await getOrCreateAppUserId();
+
+  if (!isFirebaseConfiguredInClient()) {
+    const savedPlaces = await readLocalSavedPlaces();
+    const nextPlaces = savedPlaces.map((item) => {
+      if (item.id !== placeId || item.userId !== ownerId) {
+        return item;
+      }
+
+      return {
+        ...item,
+        status: 'archived',
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    await writeLocalSavedPlaces(nextPlaces);
+    return;
+  }
+
   const { auth, db } = assertFirebaseConfigured();
-  const ownerId = assertAuthenticatedUser(auth, userId);
-  const placeRef = doc(getSavedPlacesCollection(db, ownerId), placeId);
+  const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
+  const placeRef = doc(getSavedPlacesCollection(db, validatedOwnerId), placeId);
 
   await updateDoc(placeRef, {
     status: 'archived',

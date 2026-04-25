@@ -9,6 +9,7 @@ import { LocationContext } from '../contexts/LocationContext';
 import { useSession } from '../contexts/SessionContext';
 import {
   archiveSavedPlace,
+  getOrCreateAppUserId,
   getSavedPlaces,
   saveSavedPlace,
   updateSavedPlace,
@@ -213,27 +214,28 @@ export default function PlaceSetupScreen({ navigation }) {
   }, []);
 
   const loadSavedPlaces = useCallback(async () => {
-    if (!isFirebaseConfigured || !authUser?.uid) {
+    if (isFirebaseConfigured && (isLoading || !authUser?.uid)) {
       return;
     }
 
     setIsLoadingSavedPlaces(true);
     try {
-      const places = await getSavedPlaces(authUser.uid);
+      const ownerId = authUser?.uid || await getOrCreateAppUserId();
+      const places = await getSavedPlaces(ownerId);
       setSavedPlaces(places);
     } catch (error) {
       Alert.alert('불러오기 실패', error.message || '저장된 장소를 불러오지 못했습니다.');
     } finally {
       setIsLoadingSavedPlaces(false);
     }
-  }, [authUser?.uid, isFirebaseConfigured]);
+  }, [authUser?.uid, isFirebaseConfigured, isLoading]);
 
   useEffect(() => {
     loadSavedPlaces();
   }, [loadSavedPlaces]);
 
-  const buildPlacePayload = useCallback(() => ({
-    userId: authUser.uid,
+  const buildPlacePayload = useCallback((userId) => ({
+    userId,
     name: placeName,
     latitude: location.latitude,
     longitude: location.longitude,
@@ -242,7 +244,7 @@ export default function PlaceSetupScreen({ navigation }) {
     weatherRules: buildWeatherRules(weatherRuleDrafts),
     timeRules: buildTimeRules(timeRuleDrafts),
     source: 'place-setup-screen',
-  }), [authUser?.uid, location, placeName, playlistDraft, selectedRadius, timeRuleDrafts, weatherRuleDrafts]);
+  }), [location, placeName, playlistDraft, selectedRadius, timeRuleDrafts, weatherRuleDrafts]);
 
   const applyPlaceToForm = useCallback((place) => {
     setEditingPlaceId(place.id);
@@ -275,15 +277,7 @@ export default function PlaceSetupScreen({ navigation }) {
       return;
     }
 
-    if (!isFirebaseConfigured) {
-      Alert.alert(
-        'Firebase 설정 필요',
-        `다음 환경 변수가 아직 비어 있습니다:\n${missingConfigKeys.join('\n')}`
-      );
-      return;
-    }
-
-    if (isLoading || !authUser) {
+    if (isFirebaseConfigured && (isLoading || !authUser)) {
       Alert.alert('잠시만요', '익명 세션을 준비하는 중입니다. 잠시 후 다시 시도해주세요.');
       return;
     }
@@ -295,7 +289,8 @@ export default function PlaceSetupScreen({ navigation }) {
 
     try {
       setIsSaving(true);
-      const payload = buildPlacePayload();
+      const ownerId = authUser?.uid || await getOrCreateAppUserId();
+      const payload = buildPlacePayload(ownerId);
 
       if (editingPlaceId) {
         await updateSavedPlace(editingPlaceId, payload);
@@ -309,7 +304,7 @@ export default function PlaceSetupScreen({ navigation }) {
         editingPlaceId ? '수정 완료' : '저장 완료',
         editingPlaceId
           ? `"${placeName}" 장소 설정이 업데이트되었어요.`
-          : `"${placeName}" 장소가 등록되었어요!\n${selectedRadius}m 반경에 도착하면 음악이 자동 재생됩니다.`,
+          : `"${placeName}" 장소가 등록되었어요!\n${selectedRadius}m 반경에 도착하면 음악이 자동 재생됩니다.${isFirebaseConfigured ? '' : '\n현재는 기기 내부에 임시 저장 중이에요.'}`,
         [{ text: '확인' }]
       );
 
@@ -322,10 +317,6 @@ export default function PlaceSetupScreen({ navigation }) {
   };
 
   const handleArchivePlace = async (place) => {
-    if (!authUser?.uid) {
-      return;
-    }
-
     Alert.alert(
       '장소 보관',
       `"${place.name}" 장소를 보관할까요? 자동재생 대상에서는 제외되지만 기록은 남아 있습니다.`,
@@ -336,7 +327,8 @@ export default function PlaceSetupScreen({ navigation }) {
           style: 'destructive',
           onPress: async () => {
             try {
-              await archiveSavedPlace(authUser.uid, place.id);
+              const ownerId = authUser?.uid || await getOrCreateAppUserId();
+              await archiveSavedPlace(ownerId, place.id);
               await loadSavedPlaces();
               if (editingPlaceId === place.id) {
                 resetForm();
@@ -371,7 +363,7 @@ export default function PlaceSetupScreen({ navigation }) {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={styles.header}>
+        <View style={styles.header}>
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
           <Text style={styles.backText}>←</Text>
         </TouchableOpacity>
@@ -407,6 +399,18 @@ export default function PlaceSetupScreen({ navigation }) {
           )}
           {locationError ? <Text style={styles.mapErrorText}>{locationError}</Text> : null}
         </View>
+
+        {!isFirebaseConfigured && (
+          <View style={styles.localModeBanner}>
+            <Text style={styles.localModeTitle}>로컬 저장 모드</Text>
+            <Text style={styles.localModeText}>
+              Firebase 설정 전까지 저장한 장소는 이 기기 안에만 임시로 보관됩니다.
+            </Text>
+            <Text style={styles.localModeHint}>
+              아직 비어 있는 Firebase 키: {missingConfigKeys.join(', ')}
+            </Text>
+          </View>
+        )}
 
         <View style={styles.section}>
           <Text style={styles.label}>장소 닉네임</Text>
@@ -524,6 +528,17 @@ const styles = StyleSheet.create({
   backText: { color: COLORS.text, fontSize: 22 },
   title: { color: COLORS.text, fontSize: 18, fontWeight: '700' },
   scroll: { paddingHorizontal: 20, paddingTop: 20 },
+  localModeBanner: {
+    padding: 14,
+    borderRadius: 14,
+    backgroundColor: COLORS.amberSurface,
+    borderWidth: 1,
+    borderColor: COLORS.amber + '55',
+    marginBottom: 18,
+  },
+  localModeTitle: { color: COLORS.amber, fontSize: 14, fontWeight: '700' },
+  localModeText: { color: COLORS.textSub, fontSize: 12, lineHeight: 18, marginTop: 6 },
+  localModeHint: { color: COLORS.textMuted, fontSize: 11, lineHeight: 16, marginTop: 8 },
   mapContainer: {
     height: 220, borderRadius: 16, backgroundColor: COLORS.surfaceLight,
     borderWidth: 1, borderColor: COLORS.border, marginBottom: 20,

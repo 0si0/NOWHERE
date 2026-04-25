@@ -19,7 +19,6 @@ const REQUIRED_FIREBASE_KEYS = [
   'storageBucket',
   'messagingSenderId',
   'appId',
-  'databaseURL',
 ];
 
 const PLACEHOLDER_PREFIXES = ['YOUR_', 'http://YOUR_', 'https://YOUR_'];
@@ -93,7 +92,9 @@ function connectConfiguredEmulators(services) {
 
   connectAuthEmulator(services.auth, `http://${host}:9099`, { disableWarnings: true });
   connectFirestoreEmulator(services.db, host, 8080);
-  connectDatabaseEmulator(services.rtdb, host, 9000);
+  if (services.rtdb) {
+    connectDatabaseEmulator(services.rtdb, host, 9000);
+  }
   connectStorageEmulator(services.storage, host, 9199);
   connectFunctionsEmulator(services.functions, host, 5001);
 
@@ -116,7 +117,7 @@ export function getFirebaseServices() {
     app,
     auth,
     db: getFirestore(app),
-    rtdb: getDatabase(app),
+    rtdb: isConfiguredValue(API_KEYS.FIREBASE.databaseURL) ? getDatabase(app) : null,
     storage: getStorage(app),
     functions: getFunctions(app, FIREBASE_RUNTIME.functionsRegion),
   };

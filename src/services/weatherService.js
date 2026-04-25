@@ -1,11 +1,22 @@
 import { API_KEYS, WEATHER_MOODS } from '../constants';
 
 const BASE_URL = 'https://api.openweathermap.org/data/2.5';
+const OPENWEATHER_PLACEHOLDER = 'YOUR_OPENWEATHER_API_KEY';
+
+export function isWeatherConfigured() {
+  return !!API_KEYS.OPENWEATHER && API_KEYS.OPENWEATHER !== OPENWEATHER_PLACEHOLDER;
+}
 
 export async function getCurrentWeather(latitude, longitude) {
+  if (!isWeatherConfigured()) {
+    throw new Error('OpenWeather API 키가 설정되지 않았습니다.');
+  }
+
   const url = `${BASE_URL}/weather?lat=${latitude}&lon=${longitude}&appid=${API_KEYS.OPENWEATHER}&units=metric&lang=kr`;
   const response = await fetch(url);
-  if (!response.ok) throw new Error('Weather fetch failed');
+  if (!response.ok) {
+    throw new Error(`Weather fetch failed (${response.status})`);
+  }
   const data = await response.json();
   return {
     condition: data.weather[0].main,

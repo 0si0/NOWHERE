@@ -45,11 +45,35 @@ export function isWithinRadius(userLat, userLon, placeLat, placeLon, radiusMeter
   return getDistanceMeters(userLat, userLon, placeLat, placeLon) <= radiusMeters;
 }
 
+export function normalizeSavedPlace(place) {
+  const latitude = place?.coordinates?.latitude ?? place?.lat ?? null;
+  const longitude = place?.coordinates?.longitude ?? place?.lon ?? null;
+  const radius = place?.radiusMeters ?? place?.radius ?? 0;
+
+  return {
+    ...place,
+    lat: latitude,
+    lon: longitude,
+    radius,
+  };
+}
+
 export async function checkSavedPlacesAndAutoPlay(userLocation, savedPlaces, onArrive) {
   if (!userLocation) return;
   for (const place of savedPlaces) {
-    if (isWithinRadius(userLocation.latitude, userLocation.longitude, place.lat, place.lon, place.radius)) {
-      onArrive(place);
+    const normalizedPlace = normalizeSavedPlace(place);
+
+    if (
+      normalizedPlace.lat == null ||
+      normalizedPlace.lon == null ||
+      !normalizedPlace.radius ||
+      normalizedPlace.status === 'archived'
+    ) {
+      continue;
+    }
+
+    if (isWithinRadius(userLocation.latitude, userLocation.longitude, normalizedPlace.lat, normalizedPlace.lon, normalizedPlace.radius)) {
+      onArrive(normalizedPlace);
       break;
     }
   }

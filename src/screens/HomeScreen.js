@@ -1,19 +1,66 @@
 import React, { useContext, useState, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity,
-  StyleSheet, Dimensions,
+  StyleSheet, Dimensions, Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { COLORS } from '../constants';
-import { LocationIcon, ClockIcon, CloudIcon, CameraIcon, MapIcon, PersonIcon } from '../components/Icons';
+import { LocationIcon, ClockIcon, CloudIcon, MapIcon, PersonIcon } from '../components/Icons';
 import { PlayerContext } from '../contexts/PlayerContext';
 import { LocationContext } from '../contexts/LocationContext';
+import { getWeatherMoodLabel } from '../services/weatherService';
 
 const { width } = Dimensions.get('window');
 
 const AlbumArt = ({ color, size = 48, radius = 8 }) => (
   <View style={{ width: size, height: size, borderRadius: radius, backgroundColor: color + '66', flexShrink: 0 }} />
 );
+
+const LocationStatusCard = ({
+  hasForegroundPermission,
+  hasBackgroundPermission,
+  backgroundTrackingEnabled,
+  isLocating,
+  locationError,
+  onRequestPermissions,
+  onEnableBackground,
+}) => {
+  if (hasForegroundPermission && backgroundTrackingEnabled) {
+    return null;
+  }
+
+  const title = !hasForegroundPermission
+    ? '위치 권한을 먼저 켜주세요'
+    : !hasBackgroundPermission
+      ? '백그라운드 위치 권한이 아직 없어요'
+      : '백그라운드 감지가 꺼져 있어요';
+
+  const description = !hasForegroundPermission
+    ? '현재 위치와 장소 도착 감지를 위해 위치 권한이 필요합니다.'
+    : !hasBackgroundPermission
+      ? '장소 자동재생을 위해 앱이 닫혀 있을 때도 위치 권한이 필요합니다.'
+      : '자동재생 단계에서 사용할 위치 감지를 미리 준비할 수 있어요.';
+
+  return (
+    <View style={styles.statusCard}>
+      <Text style={styles.statusTitle}>{title}</Text>
+      <Text style={styles.statusDescription}>{description}</Text>
+      {locationError ? <Text style={styles.statusError}>{locationError}</Text> : null}
+      <View style={styles.statusActions}>
+        {!hasForegroundPermission && (
+          <TouchableOpacity style={styles.statusPrimaryBtn} onPress={onRequestPermissions} disabled={isLocating}>
+            <Text style={styles.statusPrimaryText}>{isLocating ? '확인 중...' : '위치 권한 허용'}</Text>
+          </TouchableOpacity>
+        )}
+        {hasForegroundPermission && !backgroundTrackingEnabled && (
+          <TouchableOpacity style={styles.statusPrimaryBtn} onPress={onEnableBackground}>
+            <Text style={styles.statusPrimaryText}>백그라운드 감지 켜기</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    </View>
+  );
+};
 
 // 장소 추천 카드
 const PlaceCard = ({ onPlay }) => {
@@ -84,24 +131,33 @@ const TimeCard = () => {
 };
 
 // 날씨 추천 카드
-const WeatherCard = () => {
+const WeatherCard = ({ weather, isFetchingWeather, onRefreshWeather, location }) => {
+  const weatherLabel = weather
+    ? `${getWeatherMoodLabel(weather.condition)} · ${weather.temp}°C${weather.city ? ` · ${weather.city}` : ''}`
+    : '날씨 정보를 불러오는 중';
+  const moodLabel = weather?.mood?.genres?.slice(0, 2).join(' · ') || '지금 위치 기준 분위기 추천';
+
   return (
     <View style={styles.card}>
       <View style={styles.cardHeader}>
         <CloudIcon size={14} color={COLORS.amber} />
         <Text style={[styles.cardLabel, { color: COLORS.amber }]}>  날씨 추천</Text>
       </View>
-      <Text style={styles.cardTitle}>맑음 · 19°C 저녁</Text>
-      <Text style={styles.cardDesc}>오늘 같은 날씨엔 이 음악</Text>
+      <Text style={styles.cardTitle}>{weatherLabel}</Text>
+      <Text style={styles.cardDesc}>
+        {weather ? `${weather.description} 분위기에 어울리는 음악` : '위치 권한과 OpenWeather 설정이 있으면 실시간 날씨가 표시됩니다.'}
+      </Text>
       <View style={[styles.songRow, { marginTop: 10 }]}>
         <AlbumArt color={COLORS.amber} size={52} radius={10} />
         <View style={{ flex: 1, marginLeft: 12 }}>
           <Text style={styles.trackTitle}>Golden Hour Mix</Text>
-          <Text style={styles.trackArtist}>맑음 · 인디팝</Text>
-          <Text style={styles.cardSub}>24곡 · 1시간 32분</Text>
+          <Text style={styles.trackArtist}>{moodLabel}</Text>
+          <Text style={styles.cardSub}>
+            {weather ? `체감 ${weather.feelsLike}°C · 습도 ${weather.humidity}%` : '24곡 · 1시간 32분'}
+          </Text>
         </View>
-        <TouchableOpacity style={styles.smallPlayBtn}>
-          <Text style={{ color: COLORS.green, fontSize: 11 }}>▶</Text>
+        <TouchableOpacity style={styles.smallPlayBtn} onPress={() => onRefreshWeather(location, { force: true })} disabled={!location || isFetchingWeather}>
+          <Text style={{ color: COLORS.green, fontSize: 11 }}>{isFetchingWeather ? '↻' : '⟳'}</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -114,7 +170,6 @@ const QuickActions = ({ navigation }) => {
     { icon: '📍', label: '장소설정', screen: 'PlaceSetup' },
     { icon: '🎵', label: '지금여기바이브', screen: 'Vibe' },
     { icon: '🗺️', label: '뮤직지도', screen: 'MusicMap' },
-    { icon: '📷', label: 'Snap&Play', screen: 'SnapPlay' },
   ];
   return (
     <View style={styles.quickActions}>
@@ -132,7 +187,19 @@ const QuickActions = ({ navigation }) => {
 
 export default function HomeScreen({ navigation }) {
   const { play } = useContext(PlayerContext);
-  const { location } = useContext(LocationContext);
+  const {
+    location,
+    weather,
+    hasForegroundPermission,
+    hasBackgroundPermission,
+    backgroundTrackingEnabled,
+    isLocating,
+    isFetchingWeather,
+    locationError,
+    requestPermissions,
+    refreshWeather,
+    startBackgroundTracking,
+  } = useContext(LocationContext);
   const [time, setTime] = useState('');
 
   useEffect(() => {
@@ -157,6 +224,31 @@ export default function HomeScreen({ navigation }) {
     );
   };
 
+  const handleRequestPermissions = async () => {
+    try {
+      await requestPermissions();
+    } catch (error) {
+      Alert.alert('권한 요청 실패', error.message || '위치 권한을 확인하는 중 문제가 발생했습니다.');
+    }
+  };
+
+  const handleEnableBackground = async () => {
+    try {
+      const enabled = await startBackgroundTracking();
+      if (!enabled) {
+        Alert.alert('설정 필요', '백그라운드 위치 권한이 허용되어야 감지를 시작할 수 있어요.');
+      }
+    } catch (error) {
+      Alert.alert('백그라운드 감지 실패', error.message || '백그라운드 위치 감지를 시작하지 못했습니다.');
+    }
+  };
+
+  const headerWeatherText = weather
+    ? `${getWeatherMoodLabel(weather.condition)} · ${weather.temp}°C · ${time}`
+    : hasForegroundPermission
+      ? `위치 확인 중 · ${time}`
+      : `위치 권한 필요 · ${time}`;
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       {/* Header */}
@@ -164,7 +256,7 @@ export default function HomeScreen({ navigation }) {
         <View>
           <Text style={styles.appName}>NOWHERE</Text>
           <View style={styles.headerInfo}>
-            <Text style={styles.headerSub}>맑음 · 19°C · {time}</Text>
+            <Text style={styles.headerSub}>{headerWeatherText}</Text>
           </View>
         </View>
         <View style={styles.headerRight}>
@@ -178,9 +270,23 @@ export default function HomeScreen({ navigation }) {
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
+        <LocationStatusCard
+          hasForegroundPermission={hasForegroundPermission}
+          hasBackgroundPermission={hasBackgroundPermission}
+          backgroundTrackingEnabled={backgroundTrackingEnabled}
+          isLocating={isLocating}
+          locationError={locationError}
+          onRequestPermissions={handleRequestPermissions}
+          onEnableBackground={handleEnableBackground}
+        />
         <PlaceCard onPlay={handlePlay} />
         <TimeCard />
-        <WeatherCard />
+        <WeatherCard
+          weather={weather}
+          isFetchingWeather={isFetchingWeather}
+          onRefreshWeather={refreshWeather}
+          location={location}
+        />
         <QuickActions navigation={navigation} />
         <View style={{ height: 20 }} />
       </ScrollView>
@@ -206,6 +312,25 @@ const styles = StyleSheet.create({
   vibeChipText: { color: COLORS.text, fontSize: 12, fontWeight: '600' },
   avatarBtn: { padding: 4 },
   scroll: { paddingHorizontal: 20, paddingTop: 16 },
+  statusCard: {
+    backgroundColor: COLORS.surfaceLight,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 16,
+    marginBottom: 14,
+  },
+  statusTitle: { color: COLORS.text, fontSize: 15, fontWeight: '700' },
+  statusDescription: { color: COLORS.textSub, fontSize: 12, marginTop: 6, lineHeight: 18 },
+  statusError: { color: COLORS.coral, fontSize: 12, marginTop: 8 },
+  statusActions: { flexDirection: 'row', marginTop: 12 },
+  statusPrimaryBtn: {
+    backgroundColor: COLORS.green,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  statusPrimaryText: { color: '#000', fontSize: 13, fontWeight: '700' },
   card: {
     backgroundColor: COLORS.surface, borderRadius: 16, borderWidth: 1,
     borderColor: COLORS.border, padding: 16, marginBottom: 14,

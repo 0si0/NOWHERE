@@ -1,0 +1,189 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function isNumber(value) {
+      return value is int || value is float;
+    }
+
+    function isShortString(value, maxLength) {
+      return value is string && value.size() <= maxLength;
+    }
+
+    function isCoordinatesMap(data) {
+      return data.keys().hasAll(['latitude', 'longitude']) &&
+        data.keys().hasOnly(['latitude', 'longitude']) &&
+        isNumber(data.latitude) &&
+        isNumber(data.longitude) &&
+        data.latitude >= -90 &&
+        data.latitude <= 90 &&
+        data.longitude >= -180 &&
+        data.longitude <= 180;
+    }
+
+    function isPlaylistMap(data) {
+      return data.keys().hasAll(['provider', 'playlistId', 'title', 'artworkUrl']) &&
+        data.keys().hasOnly(['provider', 'playlistId', 'title', 'artworkUrl']) &&
+        isShortString(data.provider, 20) &&
+        (data.provider == 'appleMusic' || data.provider == 'spotify' || data.provider == 'unknown') &&
+        isShortString(data.playlistId, 120) &&
+        isShortString(data.title, 120) &&
+        isShortString(data.artworkUrl, 500);
+    }
+
+    function isSavedPlace(data, userId) {
+      return data.keys().hasAll([
+        'userId',
+        'name',
+        'radiusMeters',
+        'coordinates',
+        'geohash',
+        'playlist',
+        'weatherRules',
+        'timeRules',
+        'status',
+        'source',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+        data.keys().hasOnly([
+        'userId',
+        'name',
+        'radiusMeters',
+        'coordinates',
+        'geohash',
+        'playlist',
+        'weatherRules',
+        'timeRules',
+        'status',
+        'source',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+        data.userId == userId &&
+        isShortString(data.name, 60) &&
+        (data.radiusMeters == 100 || data.radiusMeters == 200 || data.radiusMeters == 300 || data.radiusMeters == 500) &&
+        isCoordinatesMap(data.coordinates) &&
+        isShortString(data.geohash, 12) &&
+        isPlaylistMap(data.playlist) &&
+        data.weatherRules is list &&
+        data.weatherRules.size() <= 8 &&
+        data.timeRules is list &&
+        data.timeRules.size() <= 8 &&
+        (data.status == 'active' || data.status == 'archived') &&
+        isShortString(data.source, 40);
+    }
+
+    function isPlayRecord(data, userId) {
+      return data.keys().hasAll([
+        'userId',
+        'trackId',
+        'title',
+        'artist',
+        'albumArtUrl',
+        'provider',
+        'placeName',
+        'savedPlaceId',
+        'location',
+        'playedAt',
+        'createdAt'
+      ]) &&
+        data.keys().hasOnly([
+        'userId',
+        'trackId',
+        'title',
+        'artist',
+        'albumArtUrl',
+        'provider',
+        'placeName',
+        'savedPlaceId',
+        'location',
+        'playedAt',
+        'createdAt'
+      ]) &&
+        data.userId == userId &&
+        isShortString(data.trackId, 160) &&
+        isShortString(data.title, 160) &&
+        isShortString(data.artist, 160) &&
+        isShortString(data.albumArtUrl, 500) &&
+        isShortString(data.provider, 20) &&
+        isShortString(data.placeName, 80) &&
+        isShortString(data.savedPlaceId, 160) &&
+        data.location.keys().hasAll(['latitude', 'longitude', 'geohash']) &&
+        data.location.keys().hasOnly(['latitude', 'longitude', 'geohash']) &&
+        (data.location.latitude == null || isNumber(data.location.latitude)) &&
+        (data.location.longitude == null || isNumber(data.location.longitude)) &&
+        isShortString(data.location.geohash, 12);
+    }
+
+    function isConsent(data, userId, consentId) {
+      return data.keys().hasAll([
+        'userId',
+        'consentType',
+        'granted',
+        'version',
+        'updatedAt'
+      ]) &&
+        data.keys().hasOnly([
+        'userId',
+        'consentType',
+        'granted',
+        'version',
+        'updatedAt'
+      ]) &&
+        data.userId == userId &&
+        data.consentType == consentId &&
+        data.granted is bool &&
+        isShortString(data.version, 20);
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create, update: if isOwner(userId) &&
+        request.resource.data.keys().hasAll([
+          'uid',
+          'isAnonymous',
+          'lastLoginAt',
+          'profileVersion',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        request.resource.data.keys().hasOnly([
+          'uid',
+          'isAnonymous',
+          'lastLoginAt',
+          'profileVersion',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        request.resource.data.uid == userId &&
+        request.resource.data.isAnonymous is bool &&
+        request.resource.data.profileVersion is int &&
+        isShortString(request.resource.data.lastLoginAt, 64);
+
+      match /savedPlaces/{placeId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isSavedPlace(request.resource.data, userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /playHistory/{recordId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isPlayRecord(request.resource.data, userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /consents/{consentId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isConsent(request.resource.data, userId, consentId);
+      }
+    }
+  }
+}

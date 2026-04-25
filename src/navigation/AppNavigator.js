@@ -9,12 +9,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '../constants';
 import { PlayerProvider } from '../contexts/PlayerContext';
 import { LocationProvider } from '../contexts/LocationContext';
+import { SessionProvider } from '../contexts/SessionContext';
 
 import HomeScreen from '../screens/HomeScreen';
 import RecommendScreen from '../screens/RecommendScreen';
 import MusicMapScreen from '../screens/MusicMapScreen';
 import VibeScreen from '../screens/VibeScreen';
-import SnapPlayScreen from '../screens/SnapPlayScreen';
 import PlaceSetupScreen from '../screens/PlaceSetupScreen';
 import NowPlayingBar from '../components/NowPlayingBar';
 
@@ -61,7 +61,6 @@ function RootStack() {
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Main" component={MainTabs} />
         <Stack.Screen name="PlaceSetup" component={PlaceSetupScreen} options={{ presentation: 'modal' }} />
-        <Stack.Screen name="SnapPlay" component={SnapPlayScreen} options={{ presentation: 'modal' }} />
         <Stack.Screen name="Vibe" component={VibeScreen} options={{ presentation: 'modal' }} />
         <Stack.Screen name="MusicMap" component={MusicMapScreen} options={{ presentation: 'modal' }} />
       </Stack.Navigator>
@@ -73,13 +72,15 @@ function RootStack() {
 export default function AppNavigator() {
   return (
     <SafeAreaProvider>
-      <PlayerProvider>
-        <LocationProvider>
-          <NavigationContainer>
-            <RootStack />
-          </NavigationContainer>
-        </LocationProvider>
-      </PlayerProvider>
+      <SessionProvider>
+        <PlayerProvider>
+          <LocationProvider>
+            <NavigationContainer>
+              <RootStack />
+            </NavigationContainer>
+          </LocationProvider>
+        </PlayerProvider>
+      </SessionProvider>
     </SafeAreaProvider>
   );
 }

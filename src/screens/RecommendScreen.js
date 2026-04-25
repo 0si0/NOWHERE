@@ -3,8 +3,8 @@ import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-nati
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { COLORS } from '../constants';
 
-const FILTERS = ['전체', '시간대', '공간', '날씨', '바이오'];
-const FILTER_MAP = { '시간대': 'time', '공간': 'space', '날씨': 'weather', '바이오': 'bio' };
+const FILTERS = ['전체', '시간대', '공간', '날씨', 'Challenge'];
+const FILTER_MAP = { '시간대': 'time', '공간': 'space', '날씨': 'weather', 'Challenge': 'challenge' };
 
 const MOCK_DATA = [
   {
@@ -26,13 +26,6 @@ const MOCK_DATA = [
     songs: [
       { id: 'r5', title: 'Golden Hour', artist: 'JVKE', color: COLORS.amber },
       { id: 'r6', title: 'Sunset Lover', artist: 'Petit Biscuit', color: '#FF6B35' },
-    ],
-  },
-  {
-    type: 'bio', label: '🏃 걷는 중 · BPM 90-110',
-    songs: [
-      { id: 'r7', title: 'Electric Feel', artist: 'MGMT', color: COLORS.coral },
-      { id: 'r8', title: 'Redbone', artist: 'Childish Gambino', color: '#C62828' },
     ],
   },
 ];

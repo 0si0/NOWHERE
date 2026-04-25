@@ -1,22 +1,37 @@
 export { COLORS } from './colors';
 
-// API Keys (replace with actual keys)
+const env = process.env;
+
+// Firebase client config values are safe to ship in the app bundle.
+// Secrets such as Claude API keys should stay in Cloud Functions only.
 export const API_KEYS = {
-  OPENWEATHER: 'YOUR_OPENWEATHER_API_KEY',
-  KAKAO_MAPS: 'YOUR_KAKAO_MAPS_API_KEY',
-  CLAUDE: 'YOUR_CLAUDE_API_KEY',
+  OPENWEATHER: env.EXPO_PUBLIC_OPENWEATHER_API_KEY || 'YOUR_OPENWEATHER_API_KEY',
+  KAKAO_MAPS: env.EXPO_PUBLIC_KAKAO_MAPS_API_KEY || 'YOUR_KAKAO_MAPS_API_KEY',
+  CLAUDE: '',
   FIREBASE: {
-    apiKey: 'YOUR_FIREBASE_API_KEY',
-    authDomain: 'YOUR_PROJECT.firebaseapp.com',
-    projectId: 'YOUR_PROJECT_ID',
-    storageBucket: 'YOUR_PROJECT.appspot.com',
-    messagingSenderId: 'YOUR_SENDER_ID',
-    appId: 'YOUR_APP_ID',
-    databaseURL: 'YOUR_DATABASE_URL',
+    apiKey: env.EXPO_PUBLIC_FIREBASE_API_KEY || 'YOUR_FIREBASE_API_KEY',
+    authDomain: env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN || 'YOUR_PROJECT.firebaseapp.com',
+    projectId: env.EXPO_PUBLIC_FIREBASE_PROJECT_ID || 'YOUR_PROJECT_ID',
+    storageBucket: env.EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET || 'YOUR_PROJECT.appspot.com',
+    messagingSenderId: env.EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || 'YOUR_SENDER_ID',
+    appId: env.EXPO_PUBLIC_FIREBASE_APP_ID || 'YOUR_APP_ID',
+    databaseURL: env.EXPO_PUBLIC_FIREBASE_DATABASE_URL || 'YOUR_DATABASE_URL',
   },
 };
 
+export const FIREBASE_RUNTIME = {
+  functionsRegion: env.EXPO_PUBLIC_FIREBASE_FUNCTIONS_REGION || 'asia-northeast3',
+  useEmulators: env.EXPO_PUBLIC_USE_FIREBASE_EMULATORS === 'true',
+  emulatorHost: env.EXPO_PUBLIC_FIREBASE_EMULATOR_HOST || '',
+};
+
 export const RADIUS_OPTIONS = [100, 200, 300, 500];
+
+export const PLAYLIST_PROVIDERS = [
+  { value: 'unknown', label: '미정' },
+  { value: 'appleMusic', label: 'Apple Music' },
+  { value: 'spotify', label: 'Spotify' },
+];
 
 export const WEATHER_MOODS = {
   Clear: { label: '맑음', emoji: '☀️', mood: 'bright', genres: ['indie pop', 'summer', 'upbeat'] },

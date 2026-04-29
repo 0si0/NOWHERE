@@ -1,369 +1,660 @@
-import React, { useContext, useState, useEffect } from 'react';
+import React, { useContext, useEffect, useMemo, useState } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity,
-  StyleSheet, Dimensions, Alert,
+  Alert,
+  Image,
+  PanResponder,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  useWindowDimensions,
+  View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { COLORS } from '../constants';
-import { LocationIcon, ClockIcon, CloudIcon, MapIcon, PersonIcon } from '../components/Icons';
+import { Ionicons } from '@expo/vector-icons';
 import { PlayerContext } from '../contexts/PlayerContext';
 import { LocationContext } from '../contexts/LocationContext';
 import { getWeatherMoodLabel } from '../services/weatherService';
 
-const { width } = Dimensions.get('window');
+const EMPTY_MARK = require('../../assets/EmptyMark.png');
 
-const AlbumArt = ({ color, size = 48, radius = 8 }) => (
-  <View style={{ width: size, height: size, borderRadius: radius, backgroundColor: color + '66', flexShrink: 0 }} />
-);
+const FEATURE_ACTIONS = [
+  { key: 'place', label: '장소 정하기', icon: 'location-outline', screen: 'PlaceSetup' },
+  { key: 'map', label: '뮤직지도', icon: 'map-outline', screen: 'MusicMap' },
+  { key: 'like', label: '좋아요', icon: 'heart-outline' },
+  { key: 'share', label: 'Shall we\nShare?', icon: 'arrow-redo-outline', screen: 'Vibe' },
+];
 
-const LocationStatusCard = ({
-  hasForegroundPermission,
-  hasBackgroundPermission,
-  backgroundTrackingEnabled,
-  isLocating,
-  locationError,
-  onRequestPermissions,
-  onEnableBackground,
-}) => {
-  if (hasForegroundPermission && backgroundTrackingEnabled) {
-    return null;
-  }
+const RECOMMENDED_TRACKS = [
+  {
+    id: 'place-recommended-track',
+    source: 'place',
+    sourceLabel: '장소 추천',
+    title: "Nothing's Gonna Hurt You Baby",
+    artist: 'Cigarettes After Sex',
+    album: 'I.',
+    color: '#FF9B91',
+    spotifyUrl: 'https://open.spotify.com/track/1W7Eajq8Hlqiy39QnuKjvD',
+    reason: '비 오는 성수동 카페에 어울리는 추천',
+  },
+  {
+    id: 'weather-recommended-track',
+    source: 'weather',
+    sourceLabel: '날씨 추천',
+    title: 'Cherry Wine',
+    artist: 'Hozier',
+    album: 'Spotify',
+    color: '#D69A86',
+    spotifyUrl: 'https://open.spotify.com/track/0QnW4TK50P6O4LI9UmXU8q',
+    reason: '촉촉한 밤공기와 어울리는 추천',
+  },
+  {
+    id: 'time-recommended-track',
+    source: 'time',
+    sourceLabel: '시간 추천',
+    title: 'Thinkin Bout You',
+    artist: 'Frank Ocean',
+    album: 'Spotify',
+    color: '#C9968C',
+    spotifyUrl: 'https://open.spotify.com/track/7DfFc7a6Rwfi3YQMRbDMau',
+    reason: '이 시간대에 자주 어울리는 추천',
+  },
+  {
+    id: 'favorite-recommended-track',
+    source: 'favorite',
+    sourceLabel: '취향 추천',
+    title: 'Night Owl',
+    artist: 'Galimatias',
+    album: 'Spotify',
+    color: '#A98791',
+    spotifyUrl: 'https://open.spotify.com/track/2WlO6U5m0pyQ5xXyDqS1V3',
+    reason: '추천 후보가 부족할 때 이어지는 취향 기반 추천',
+  },
+];
 
-  const title = !hasForegroundPermission
-    ? '위치 권한을 먼저 켜주세요'
-    : !hasBackgroundPermission
-      ? '백그라운드 위치 권한이 아직 없어요'
-      : '백그라운드 감지가 꺼져 있어요';
+const FALLBACK_TRACK = RECOMMENDED_TRACKS[0];
 
-  const description = !hasForegroundPermission
-    ? '현재 위치와 장소 도착 감지를 위해 위치 권한이 필요합니다.'
-    : !hasBackgroundPermission
-      ? '장소 자동재생을 위해 앱이 닫혀 있을 때도 위치 권한이 필요합니다.'
-      : '자동재생 단계에서 사용할 위치 감지를 미리 준비할 수 있어요.';
+function formatTimeLabel() {
+  const now = new Date();
+  const hours = now.getHours();
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const period = hours < 12 ? '오전' : '오후';
+  return `${period} ${hours % 12 || 12}:${minutes}`;
+}
 
+function ContextChip({ icon, label, compact }) {
   return (
-    <View style={styles.statusCard}>
-      <Text style={styles.statusTitle}>{title}</Text>
-      <Text style={styles.statusDescription}>{description}</Text>
-      {locationError ? <Text style={styles.statusError}>{locationError}</Text> : null}
-      <View style={styles.statusActions}>
-        {!hasForegroundPermission && (
-          <TouchableOpacity style={styles.statusPrimaryBtn} onPress={onRequestPermissions} disabled={isLocating}>
-            <Text style={styles.statusPrimaryText}>{isLocating ? '확인 중...' : '위치 권한 허용'}</Text>
-          </TouchableOpacity>
-        )}
-        {hasForegroundPermission && !backgroundTrackingEnabled && (
-          <TouchableOpacity style={styles.statusPrimaryBtn} onPress={onEnableBackground}>
-            <Text style={styles.statusPrimaryText}>백그라운드 감지 켜기</Text>
-          </TouchableOpacity>
-        )}
-      </View>
+    <View style={styles.contextChip}>
+      <Ionicons name={icon} size={compact ? 15 : 17} color="#FFD2C9" />
+      <Text style={[styles.contextChipText, compact && styles.contextChipTextCompact]} numberOfLines={1}>{label}</Text>
     </View>
   );
-};
+}
 
-// 장소 추천 카드
-const PlaceCard = ({ onPlay }) => {
-  const topTrack = { title: "Nothing's Gonna Hurt You Baby", artist: "Cigarettes After Sex", color: COLORS.green };
-  const sub = [
-    { title: "2월 Cherry Wine", artist: "Hozier" },
-    { title: "3위 더보기", artist: "" },
-  ];
+function ActionTile({ action, onPress, tileHeight, compact }) {
   return (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <LocationIcon size={14} color={COLORS.green} />
-        <Text style={styles.cardLabel}>  장소 추천 · 한강공원</Text>
-      </View>
-      <Text style={styles.cardTitle}>지금 이 장소에선 이 노래!</Text>
-      <View style={styles.topTrackRow}>
-        <AlbumArt color={COLORS.green} size={52} radius={10} />
-        <View style={{ flex: 1, marginLeft: 12 }}>
-          <Text style={styles.trackTitle}>{topTrack.title}</Text>
-          <Text style={styles.trackArtist}>{topTrack.artist}</Text>
-          <Text style={styles.cardSub}>단골곡 1위 · 12회 재생</Text>
-        </View>
-        <TouchableOpacity style={styles.playBtn} onPress={onPlay}>
-          <View style={styles.playBtnInner}>
-            <Text style={{ color: '#000', fontSize: 12, fontWeight: '700' }}>▶</Text>
-          </View>
-        </TouchableOpacity>
-      </View>
-      <View style={styles.subTracks}>
-        {sub.map((s, i) => (
-          <Text key={i} style={styles.subTrackText}>{s.title}{s.artist ? ` — ${s.artist}` : ''}</Text>
-        ))}
-      </View>
-    </View>
+    <TouchableOpacity style={[styles.actionTile, { height: tileHeight }]} activeOpacity={0.82} onPress={onPress}>
+      <Ionicons name={action.icon} size={compact ? 34 : 42} color="#FFD2C9" />
+      <Text style={[styles.actionLabel, compact && styles.actionLabelCompact]}>{action.label}</Text>
+    </TouchableOpacity>
   );
-};
+}
 
-// 시간대 추천 카드
-const TimeCard = () => {
-  const hour = new Date().getHours();
-  const label = hour >= 21 ? '밤 9-11시 단골' : hour >= 17 ? '저녁 시간대 단골' : hour >= 11 ? '낮 시간대 단골' : '아침 시간대 단골';
-  const songs = [
-    { title: "Thinkin Bout You", artist: "Frank Ocean", color: COLORS.purple },
-    { title: "Night Owl", artist: "Galimatias", color: '#5B8DEF' },
-  ];
-  return (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <ClockIcon size={14} color={COLORS.purple} />
-        <Text style={[styles.cardLabel, { color: COLORS.purple }]}>  시간대 추천</Text>
-      </View>
-      <Text style={styles.cardTitle}>{label}</Text>
-      <Text style={styles.cardDesc}>이 시간대에 자주 들었던 음악</Text>
-      {songs.map((s, i) => (
-        <View key={i} style={[styles.songRow, { marginTop: i === 0 ? 10 : 8 }]}>
-          <AlbumArt color={s.color} size={40} radius={8} />
-          <View style={{ flex: 1, marginLeft: 10 }}>
-            <Text style={styles.trackTitle}>{s.title}</Text>
-            <Text style={styles.trackArtist}>{s.artist}</Text>
-          </View>
-          <TouchableOpacity style={styles.smallPlayBtn}>
-            <Text style={{ color: COLORS.green, fontSize: 11 }}>▶</Text>
-          </TouchableOpacity>
-        </View>
-      ))}
-    </View>
-  );
-};
+function fitTitleSize(title, compact) {
+  const length = title.length;
+  if (length > 34) return compact ? 16 : 18;
+  if (length > 26) return compact ? 18 : 21;
+  if (length > 20) return compact ? 20 : 24;
+  return compact ? 24 : 30;
+}
 
-// 날씨 추천 카드
-const WeatherCard = ({ weather, isFetchingWeather, onRefreshWeather, location }) => {
-  const weatherLabel = weather
-    ? `${getWeatherMoodLabel(weather.condition)} · ${weather.temp}°C${weather.city ? ` · ${weather.city}` : ''}`
-    : '날씨 정보를 불러오는 중';
-  const moodLabel = weather?.mood?.genres?.slice(0, 2).join(' · ') || '지금 위치 기준 분위기 추천';
+function NowPlayingPill({ currentTrack, playerStatus, height, bottom, compact }) {
+  const track = currentTrack || FALLBACK_TRACK;
+  const isPlaying = Boolean(playerStatus?.isPlaying);
+  const statusText = isPlaying ? 'Spotify에서 재생 중' : 'Spotify 재생 대기';
 
   return (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <CloudIcon size={14} color={COLORS.amber} />
-        <Text style={[styles.cardLabel, { color: COLORS.amber }]}>  날씨 추천</Text>
+    <View style={[styles.nowPlayingPill, { height, bottom, borderRadius: height / 2 }]}>
+      <View style={styles.nowPlayingTextWrap}>
+        <Text style={[styles.nowPlayingEyebrow, compact && styles.nowPlayingEyebrowCompact]}>N O W   P L A Y I N G</Text>
+        <Text style={[styles.nowPlayingTitle, compact && styles.nowPlayingTitleCompact]} numberOfLines={1}>
+          {track.title}  ·  {track.artist}
+        </Text>
+        <Text style={[styles.nowPlayingSub, compact && styles.nowPlayingSubCompact]}>{statusText}</Text>
       </View>
-      <Text style={styles.cardTitle}>{weatherLabel}</Text>
-      <Text style={styles.cardDesc}>
-        {weather ? `${weather.description} 분위기에 어울리는 음악` : '위치 권한과 OpenWeather 설정이 있으면 실시간 날씨가 표시됩니다.'}
-      </Text>
-      <View style={[styles.songRow, { marginTop: 10 }]}>
-        <AlbumArt color={COLORS.amber} size={52} radius={10} />
-        <View style={{ flex: 1, marginLeft: 12 }}>
-          <Text style={styles.trackTitle}>Golden Hour Mix</Text>
-          <Text style={styles.trackArtist}>{moodLabel}</Text>
-          <Text style={styles.cardSub}>
-            {weather ? `체감 ${weather.feelsLike}°C · 습도 ${weather.humidity}%` : '24곡 · 1시간 32분'}
-          </Text>
-        </View>
-        <TouchableOpacity style={styles.smallPlayBtn} onPress={() => onRefreshWeather(location, { force: true })} disabled={!location || isFetchingWeather}>
-          <Text style={{ color: COLORS.green, fontSize: 11 }}>{isFetchingWeather ? '↻' : '⟳'}</Text>
-        </TouchableOpacity>
-      </View>
+      <Ionicons name="stats-chart-outline" size={compact ? 24 : 29} color="#FFB4A9" />
     </View>
   );
-};
-
-// 기능 바로가기
-const QuickActions = ({ navigation }) => {
-  const actions = [
-    { icon: '📍', label: '장소설정', screen: 'PlaceSetup' },
-    { icon: '🎵', label: '지금여기바이브', screen: 'Vibe' },
-    { icon: '🗺️', label: '뮤직지도', screen: 'MusicMap' },
-  ];
-  return (
-    <View style={styles.quickActions}>
-      {actions.map((a) => (
-        <TouchableOpacity key={a.screen} style={styles.quickBtn} onPress={() => navigation.navigate(a.screen)}>
-          <View style={styles.quickBtnIcon}>
-            <Text style={{ fontSize: 20 }}>{a.icon}</Text>
-          </View>
-          <Text style={styles.quickBtnLabel}>{a.label}</Text>
-        </TouchableOpacity>
-      ))}
-    </View>
-  );
-};
+}
 
 export default function HomeScreen({ navigation }) {
-  const { play } = useContext(PlayerContext);
+  const { play, currentTrack, playerStatus } = useContext(PlayerContext);
   const {
-    location,
     weather,
     hasForegroundPermission,
-    hasBackgroundPermission,
-    backgroundTrackingEnabled,
     isLocating,
-    isFetchingWeather,
     locationError,
     requestPermissions,
-    refreshWeather,
-    startBackgroundTracking,
   } = useContext(LocationContext);
-  const [time, setTime] = useState('');
+  const { width, height } = useWindowDimensions();
+  const [timeLabel, setTimeLabel] = useState(formatTimeLabel());
+  const [isActionPanelOpen, setIsActionPanelOpen] = useState(false);
+  const [selectedTrackIndex, setSelectedTrackIndex] = useState(0);
+  const [artworkByTrackId, setArtworkByTrackId] = useState({});
+
+  const isCompact = height < 760;
+  const wheelSize = Math.min(width * (isCompact ? 0.48 : 0.53), isCompact ? 194 : 224);
+  const albumInset = Math.max(7, wheelSize * 0.035);
+  const sideInset = Math.max(22, width * 0.055);
+  const contextTop = isCompact ? 104 : 118;
+  const heroTop = contextTop + (isCompact ? 56 : 70);
+  const dotsTop = heroTop + wheelSize + (isCompact ? 17 : 22);
+  const trackTop = dotsTop + (isCompact ? 30 : 40);
+  const tileHeight = isCompact ? 76 : 92;
+  const nowPlayingHeight = isCompact ? 64 : 74;
+  const nowPlayingBottom = isActionPanelOpen ? (isCompact ? 0 : 2) : 10;
+  const nowPlayingTop = height - nowPlayingHeight - nowPlayingBottom;
+  const closeSize = isCompact ? 44 : 50;
+  const closeGap = isCompact ? 4 : 6;
+  const panelPaddingY = isCompact ? 12 : 16;
+  const panelHeight = tileHeight + panelPaddingY * 2;
+  const panelTop = Math.max(
+    trackTop + (isCompact ? 74 : 92),
+    nowPlayingTop - closeSize - closeGap - panelHeight
+  );
+  const closeTop = nowPlayingTop - closeSize - closeGap;
+  const selectedTrack = RECOMMENDED_TRACKS[selectedTrackIndex] || FALLBACK_TRACK;
+  const albumArtworkUrl = artworkByTrackId[selectedTrack.id] || '';
+  const titleFontSize = fitTitleSize(selectedTrack.title, isCompact);
+
+  const moveRecommendation = (offset) => {
+    setSelectedTrackIndex((prev) => {
+      const next = prev + offset;
+      if (next < 0) return RECOMMENDED_TRACKS.length - 1;
+      if (next >= RECOMMENDED_TRACKS.length) return 0;
+      return next;
+    });
+  };
+
+  const wheelPanResponder = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gestureState) => (
+      Math.abs(gestureState.dx) > 18 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy)
+    ),
+    onPanResponderRelease: (_, gestureState) => {
+      if (gestureState.dx <= -35) {
+        moveRecommendation(1);
+      } else if (gestureState.dx >= 35) {
+        moveRecommendation(-1);
+      }
+    },
+  }), []);
 
   useEffect(() => {
-    const update = () => {
-      const now = new Date();
-      const h = now.getHours(), m = now.getMinutes();
-      const period = h < 6 ? '새벽' : h < 12 ? '오전' : h < 18 ? '오후' : '밤';
-      setTime(`${period} ${h % 12 || 12}:${String(m).padStart(2, '0')}`);
-    };
-    update();
-    const t = setInterval(update, 60000);
-    return () => clearInterval(t);
+    const interval = setInterval(() => setTimeLabel(formatTimeLabel()), 30000);
+    return () => clearInterval(interval);
   }, []);
 
-  const handlePlay = () => {
-    play(
-      { id: '1', title: "Nothing's Gonna Hurt You Baby", artist: 'Cigarettes After Sex', color: COLORS.green },
-      [
-        { id: '1', title: "Nothing's Gonna Hurt You Baby", artist: 'Cigarettes After Sex', color: COLORS.green },
-        { id: '2', title: 'Cherry Wine', artist: 'Hozier', color: '#8B4513' },
-      ]
-    );
-  };
+  useEffect(() => {
+    let mounted = true;
 
-  const handleRequestPermissions = async () => {
-    try {
-      await requestPermissions();
-    } catch (error) {
-      Alert.alert('권한 요청 실패', error.message || '위치 권한을 확인하는 중 문제가 발생했습니다.');
-    }
-  };
-
-  const handleEnableBackground = async () => {
-    try {
-      const enabled = await startBackgroundTracking();
-      if (!enabled) {
-        Alert.alert('설정 필요', '백그라운드 위치 권한이 허용되어야 감지를 시작할 수 있어요.');
+    Promise.all(
+      RECOMMENDED_TRACKS.map(async (track) => {
+        try {
+          const encodedUrl = encodeURIComponent(track.spotifyUrl);
+          const response = await fetch(`https://open.spotify.com/oembed?url=${encodedUrl}`);
+          const payload = response.ok ? await response.json() : null;
+          return [track.id, payload?.thumbnail_url || ''];
+        } catch (error) {
+          return [track.id, ''];
+        }
+      })
+    ).then((entries) => {
+      if (mounted) {
+        setArtworkByTrackId(Object.fromEntries(entries.filter(([, artworkUrl]) => artworkUrl)));
       }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const weatherLabel = useMemo(() => {
+    if (weather) {
+      const mood = getWeatherMoodLabel(weather.condition);
+      return mood.includes('비') ? '비 오는 밤' : `${mood} 밤`;
+    }
+    return hasForegroundPermission ? '날씨 확인 중' : '비 오는 밤';
+  }, [hasForegroundPermission, weather]);
+
+  const placeLabel = weather?.city ? `${weather.city} 카페` : '성수동 카페';
+
+  const handlePlay = async () => {
+    if (!hasForegroundPermission) {
+      try {
+        await requestPermissions();
+      } catch (error) {
+        Alert.alert('위치 권한 실패', error.message || '위치 권한을 확인하지 못했습니다.');
+      }
+    }
+
+    const orderedQueue = RECOMMENDED_TRACKS
+      .slice(selectedTrackIndex)
+      .concat(RECOMMENDED_TRACKS.slice(0, selectedTrackIndex));
+
+    try {
+      await play(selectedTrack, orderedQueue);
     } catch (error) {
-      Alert.alert('백그라운드 감지 실패', error.message || '백그라운드 위치 감지를 시작하지 못했습니다.');
+      Alert.alert('Spotify 재생 실패', error.message || 'Spotify로 곡을 열지 못했습니다.');
     }
   };
 
-  const headerWeatherText = weather
-    ? `${getWeatherMoodLabel(weather.condition)} · ${weather.temp}°C · ${time}`
-    : hasForegroundPermission
-      ? `위치 확인 중 · ${time}`
-      : `위치 권한 필요 · ${time}`;
+  const handleAction = (action) => {
+    if (action.screen) {
+      navigation.navigate(action.screen);
+    }
+  };
+
+  const handleWheelLongPress = () => {
+    setIsActionPanelOpen(true);
+  };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      {/* Header */}
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.appName}>NOWHERE</Text>
-          <View style={styles.headerInfo}>
-            <Text style={styles.headerSub}>{headerWeatherText}</Text>
-          </View>
-        </View>
-        <View style={styles.headerRight}>
-          <TouchableOpacity style={styles.vibeChip} onPress={() => navigation.navigate('Vibe')}>
-            <Text style={styles.vibeChipText}>근처 5명</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.avatarBtn}>
-            <PersonIcon size={20} color={COLORS.textSub} />
+    <View style={styles.container}>
+      <View style={styles.backdrop} />
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+        <View style={[styles.topBar, { paddingHorizontal: sideInset }]}>
+          <Text style={styles.logo}>NOWHERE</Text>
+          <TouchableOpacity style={styles.tuneButton} activeOpacity={0.8}>
+            <Ionicons name="options-outline" size={28} color="#FFD2C9" />
           </TouchableOpacity>
         </View>
-      </View>
 
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
-        <LocationStatusCard
-          hasForegroundPermission={hasForegroundPermission}
-          hasBackgroundPermission={hasBackgroundPermission}
-          backgroundTrackingEnabled={backgroundTrackingEnabled}
-          isLocating={isLocating}
-          locationError={locationError}
-          onRequestPermissions={handleRequestPermissions}
-          onEnableBackground={handleEnableBackground}
+        <View style={[styles.contextRow, { top: contextTop }]}>
+          <ContextChip icon="location-outline" label={placeLabel} compact={isCompact} />
+          <ContextChip icon="time-outline" label={timeLabel} compact={isCompact} />
+          <ContextChip icon="rainy-outline" label={weatherLabel} compact={isCompact} />
+        </View>
+
+        {locationError ? (
+          <Text style={styles.locationWarning} numberOfLines={1}>{locationError}</Text>
+        ) : null}
+
+        <View style={[styles.heroWrap, { top: heroTop }]}>
+          <TouchableOpacity style={styles.arrowButton} activeOpacity={0.8} onPress={() => moveRecommendation(-1)}>
+            <Ionicons name="chevron-back-outline" size={38} color="#FFD2C9" />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            {...wheelPanResponder.panHandlers}
+            activeOpacity={0.88}
+            onPress={handlePlay}
+            onLongPress={handleWheelLongPress}
+            delayLongPress={420}
+            style={[
+              styles.wheelOuter,
+              {
+                width: wheelSize,
+                height: wheelSize,
+                borderRadius: wheelSize / 2,
+              },
+            ]}
+          >
+            <Image
+              source={albumArtworkUrl ? { uri: albumArtworkUrl } : EMPTY_MARK}
+              style={[
+                styles.wheelImage,
+                {
+                  width: wheelSize - albumInset * 2,
+                  height: wheelSize - albumInset * 2,
+                  borderRadius: (wheelSize - albumInset * 2) / 2,
+                },
+              ]}
+              resizeMode="cover"
+            />
+            <View style={styles.wheelGlowDot} />
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.arrowButton} activeOpacity={0.8} onPress={() => moveRecommendation(1)}>
+            <Ionicons name="chevron-forward-outline" size={38} color="#FFD2C9" />
+          </TouchableOpacity>
+        </View>
+
+        <View style={[styles.pageDots, { top: dotsTop }]}>
+          {RECOMMENDED_TRACKS.map((track, index) => (
+            <View key={track.id} style={[styles.dot, index === selectedTrackIndex && styles.dotActive]} />
+          ))}
+        </View>
+
+        <View style={[styles.trackBlock, { top: trackTop }]}>
+          <View style={styles.titleRow}>
+            <Text style={[styles.trackTitle, { fontSize: titleFontSize }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.74}>
+              {selectedTrack.title}
+            </Text>
+          </View>
+          <Text style={styles.trackMeta}>{selectedTrack.artist}</Text>
+          <Text style={[styles.recommendReason, isCompact && styles.recommendReasonCompact]}>{selectedTrack.reason}</Text>
+          <TouchableOpacity style={styles.playHint} activeOpacity={0.8} onPress={handlePlay} disabled={isLocating}>
+            <Ionicons name="link-outline" size={22} color="#B9AAA7" />
+            <Text style={styles.playHintText}>{isLocating ? '위치 확인 중' : '원을 탭하여 재생'}</Text>
+          </TouchableOpacity>
+        </View>
+
+        {isActionPanelOpen ? (
+          <View style={[styles.actionsPanel, { top: panelTop, paddingVertical: panelPaddingY }]}>
+            <View style={styles.actionsRow}>
+              {FEATURE_ACTIONS.map((action) => (
+                <ActionTile
+                  key={action.key}
+                  action={action}
+                  onPress={() => handleAction(action)}
+                  tileHeight={tileHeight}
+                  compact={isCompact}
+                />
+              ))}
+            </View>
+          </View>
+        ) : null}
+
+        {isActionPanelOpen ? (
+          <TouchableOpacity
+            style={[styles.closeButton, { top: closeTop, width: closeSize, height: closeSize, borderRadius: closeSize / 2, marginLeft: -closeSize / 2 }]}
+            activeOpacity={0.8}
+            onPress={() => setIsActionPanelOpen(false)}
+          >
+            <Ionicons name="close-outline" size={42} color="#FFD2C9" />
+          </TouchableOpacity>
+        ) : null}
+
+        <NowPlayingPill
+          currentTrack={currentTrack}
+          playerStatus={playerStatus}
+          height={nowPlayingHeight}
+          bottom={nowPlayingBottom}
+          compact={isCompact}
         />
-        <PlaceCard onPlay={handlePlay} />
-        <TimeCard />
-        <WeatherCard
-          weather={weather}
-          isFetchingWeather={isFetchingWeather}
-          onRefreshWeather={refreshWeather}
-          location={location}
-        />
-        <QuickActions navigation={navigation} />
-        <View style={{ height: 20 }} />
-      </ScrollView>
-    </SafeAreaView>
+      </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg },
-  header: {
-    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    paddingHorizontal: 20, paddingVertical: 12,
-    borderBottomWidth: 1, borderBottomColor: COLORS.border,
+  container: { flex: 1, backgroundColor: '#080808' },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#07080A',
   },
-  appName: { color: COLORS.text, fontSize: 20, fontWeight: '800', letterSpacing: 2 },
-  headerInfo: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
-  headerSub: { color: COLORS.textSub, fontSize: 12 },
-  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  vibeChip: {
-    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
-    backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border,
+  safeArea: {
+    flex: 1,
+    paddingTop: 18,
+    paddingBottom: 10,
+    position: 'relative',
   },
-  vibeChipText: { color: COLORS.text, fontSize: 12, fontWeight: '600' },
-  avatarBtn: { padding: 4 },
-  scroll: { paddingHorizontal: 20, paddingTop: 16 },
-  statusCard: {
-    backgroundColor: COLORS.surfaceLight,
-    borderRadius: 16,
+  topBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  logo: {
+    color: '#FFD2C9',
+    fontSize: 22,
+    fontWeight: '300',
+    letterSpacing: 8,
+  },
+  tuneButton: {
+    width: 44,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  contextRow: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+  },
+  contextChip: {
+    flex: 1,
+    maxWidth: 122,
+    height: 40,
+    paddingHorizontal: 10,
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 16,
-    marginBottom: 14,
+    borderColor: 'rgba(255, 168, 158, 0.58)',
+    backgroundColor: 'rgba(45, 35, 34, 0.58)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
   },
-  statusTitle: { color: COLORS.text, fontSize: 15, fontWeight: '700' },
-  statusDescription: { color: COLORS.textSub, fontSize: 12, marginTop: 6, lineHeight: 18 },
-  statusError: { color: COLORS.coral, fontSize: 12, marginTop: 8 },
-  statusActions: { flexDirection: 'row', marginTop: 12 },
-  statusPrimaryBtn: {
-    backgroundColor: COLORS.green,
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+  contextChipText: {
+    color: '#F9D8D1',
+    fontSize: 13,
+    fontWeight: '500',
+    flexShrink: 1,
   },
-  statusPrimaryText: { color: '#000', fontSize: 13, fontWeight: '700' },
-  card: {
-    backgroundColor: COLORS.surface, borderRadius: 16, borderWidth: 1,
-    borderColor: COLORS.border, padding: 16, marginBottom: 14,
+  contextChipTextCompact: {
+    fontSize: 12,
   },
-  cardHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
-  cardLabel: { color: COLORS.green, fontSize: 12, fontWeight: '600' },
-  cardTitle: { color: COLORS.text, fontSize: 16, fontWeight: '700', marginBottom: 2 },
-  cardDesc: { color: COLORS.textSub, fontSize: 12, marginBottom: 0 },
-  cardSub: { color: COLORS.textMuted, fontSize: 11, marginTop: 3 },
-  topTrackRow: { flexDirection: 'row', alignItems: 'center', marginTop: 12 },
-  trackTitle: { color: COLORS.text, fontSize: 14, fontWeight: '600' },
-  trackArtist: { color: COLORS.textSub, fontSize: 12, marginTop: 2 },
-  playBtn: { marginLeft: 8 },
-  playBtnInner: {
-    width: 36, height: 36, borderRadius: 18,
-    backgroundColor: COLORS.green, alignItems: 'center', justifyContent: 'center',
+  locationWarning: {
+    position: 'absolute',
+    top: 151,
+    left: 0,
+    right: 0,
+    color: '#FFB4A9',
+    fontSize: 12,
+    textAlign: 'center',
+    paddingHorizontal: 24,
   },
-  smallPlayBtn: {
-    width: 30, height: 30, borderRadius: 15, backgroundColor: COLORS.green + '22',
-    alignItems: 'center', justifyContent: 'center',
+  heroWrap: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 22,
   },
-  subTracks: { marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: COLORS.border },
-  subTrackText: { color: COLORS.textSub, fontSize: 12, marginBottom: 4 },
-  songRow: { flexDirection: 'row', alignItems: 'center' },
-  quickActions: {
-    flexDirection: 'row', justifyContent: 'space-between',
-    marginTop: 4, marginBottom: 8,
+  arrowButton: {
+    width: 44,
+    height: 60,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  quickBtn: { alignItems: 'center', flex: 1 },
-  quickBtnIcon: {
-    width: 52, height: 52, borderRadius: 16,
-    backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border,
-    alignItems: 'center', justifyContent: 'center', marginBottom: 6,
+  wheelOuter: {
+    borderWidth: 2,
+    borderColor: '#FF8E89',
+    backgroundColor: 'rgba(26, 22, 23, 0.94)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    shadowColor: '#FF8E89',
+    shadowOpacity: 0.65,
+    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 10,
   },
-  quickBtnLabel: { color: COLORS.textSub, fontSize: 11, textAlign: 'center' },
+  wheelImage: {
+    opacity: 1,
+  },
+  wheelGlowDot: {
+    position: 'absolute',
+    right: 17,
+    top: 49,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#FF928C',
+    shadowColor: '#FF8E89',
+    shadowOpacity: 0.9,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  pageDots: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 18,
+  },
+  dot: {
+    width: 13,
+    height: 13,
+    borderRadius: 7,
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
+  },
+  dotActive: {
+    backgroundColor: '#FFAAA1',
+  },
+  trackBlock: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 18,
+  },
+  trackTitle: {
+    color: '#FFE7E2',
+    fontSize: 30,
+    fontWeight: '300',
+    letterSpacing: 0,
+    textShadowColor: 'rgba(255, 174, 162, 0.45)',
+    textShadowRadius: 10,
+  },
+  trackMeta: {
+    color: '#EAD0CB',
+    fontSize: 15,
+    marginTop: 6,
+  },
+  recommendReason: {
+    color: '#FF9186',
+    fontSize: 15,
+    marginTop: 16,
+  },
+  recommendReasonCompact: {
+    fontSize: 15,
+    marginTop: 14,
+  },
+  playHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 20,
+  },
+  playHintText: {
+    color: '#B9AAA7',
+    fontSize: 14,
+  },
+  actionsPanel: {
+    position: 'absolute',
+    left: 14,
+    right: 14,
+    paddingHorizontal: 12,
+    borderRadius: 26,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 160, 150, 0.66)',
+    backgroundColor: 'rgba(39, 29, 30, 0.70)',
+    shadowColor: '#FF8D84',
+    shadowOpacity: 0.3,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: -2 },
+  },
+  actionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 9,
+  },
+  actionTile: {
+    flex: 1,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 160, 150, 0.38)',
+    backgroundColor: 'rgba(31, 28, 29, 0.73)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  actionLabel: {
+    minHeight: 42,
+    color: '#FFE5DF',
+    fontSize: 15,
+    lineHeight: 20,
+    textAlign: 'center',
+    fontWeight: '400',
+  },
+  actionLabelCompact: {
+    minHeight: 34,
+    fontSize: 14,
+    lineHeight: 19,
+  },
+  closeButton: {
+    position: 'absolute',
+    left: '50%',
+    marginLeft: -35,
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 160, 150, 0.56)',
+    backgroundColor: 'rgba(43, 33, 33, 0.88)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  nowPlayingPill: {
+    position: 'absolute',
+    left: 38,
+    right: 38,
+    bottom: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 166, 154, 0.75)',
+    backgroundColor: 'rgba(35, 29, 31, 0.82)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+    gap: 12,
+    shadowColor: '#FF8E89',
+    shadowOpacity: 0.48,
+    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 0 },
+  },
+  nowPlayingTextWrap: {
+    flex: 1,
+    alignItems: 'center',
+  },
+  nowPlayingEyebrow: {
+    color: '#EAB8B1',
+    fontSize: 11,
+    letterSpacing: 4,
+  },
+  nowPlayingEyebrowCompact: {
+    fontSize: 11,
+    letterSpacing: 4,
+  },
+  nowPlayingTitle: {
+    color: '#FFE2DC',
+    fontSize: 15,
+    marginTop: 6,
+    maxWidth: '100%',
+  },
+  nowPlayingTitleCompact: {
+    fontSize: 15,
+    marginTop: 4,
+  },
+  nowPlayingSub: {
+    color: '#B9AAA7',
+    fontSize: 13,
+    marginTop: 3,
+  },
+  nowPlayingSubCompact: {
+    fontSize: 11,
+    marginTop: 2,
+  },
 });

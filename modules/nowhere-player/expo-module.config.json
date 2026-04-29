@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["NowherePlayerModule"]
+  },
+  "android": {
+    "modules": ["com.nowhere.player.NowherePlayerModule"]
+  }
+}

@@ -32,7 +32,7 @@ service cloud.firestore {
       return data.keys().hasAll(['provider', 'playlistId', 'title', 'artworkUrl']) &&
         data.keys().hasOnly(['provider', 'playlistId', 'title', 'artworkUrl']) &&
         isShortString(data.provider, 20) &&
-        (data.provider == 'appleMusic' || data.provider == 'spotify' || data.provider == 'unknown') &&
+        (data.provider == 'spotify' || data.provider == 'unknown') &&
         isShortString(data.playlistId, 120) &&
         isShortString(data.title, 120) &&
         isShortString(data.artworkUrl, 500);

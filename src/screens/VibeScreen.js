@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useContext } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
+import { Alert, View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { COLORS } from '../constants';
 import { PlayerContext } from '../contexts/PlayerContext';
@@ -30,11 +30,15 @@ export default function VibeScreen() {
     (l) => currentTrack && l.song === currentTrack.title
   );
 
-  const handlePlayTop = () => {
-    play(
-      { id: 'vibe-top', title: TOP_SONG.title, artist: TOP_SONG.artist, color: TOP_SONG.color },
-      LISTENERS.map((l, i) => ({ id: `vibe-${i}`, title: l.song, artist: l.artist, color: l.color }))
-    );
+  const handlePlayTop = async () => {
+    try {
+      await play(
+        { id: 'vibe-top', title: TOP_SONG.title, artist: TOP_SONG.artist, color: TOP_SONG.color },
+        LISTENERS.map((l, i) => ({ id: `vibe-${i}`, title: l.song, artist: l.artist, color: l.color }))
+      );
+    } catch (error) {
+      Alert.alert('Spotify 재생 실패', error.message || 'Spotify 재생을 시작하지 못했습니다.');
+    }
   };
 
   return (

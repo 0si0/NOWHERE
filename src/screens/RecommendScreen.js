@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
+import React, { useContext, useState } from 'react';
+import { Alert, View, Text, ScrollView, TouchableOpacity, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { COLORS } from '../constants';
+import { PlayerContext } from '../contexts/PlayerContext';
 
 const FILTERS = ['전체', '시간대', '공간', '날씨', 'Challenge'];
 const FILTER_MAP = { '시간대': 'time', '공간': 'space', '날씨': 'weather', 'Challenge': 'challenge' };
@@ -30,25 +31,40 @@ const MOCK_DATA = [
   },
 ];
 
-const SongRow = ({ song }) => (
+const SongRow = ({ song, onPlay }) => (
   <View style={styles.songRow}>
     <View style={[styles.albumArt, { backgroundColor: song.color + '44' }]} />
     <View style={{ flex: 1, marginLeft: 12 }}>
       <Text style={styles.songTitle}>{song.title}</Text>
       <Text style={styles.songArtist}>{song.artist}</Text>
     </View>
-    <TouchableOpacity style={styles.playBtn}>
+    <TouchableOpacity style={styles.playBtn} onPress={() => onPlay(song)}>
       <Text style={{ color: COLORS.green, fontSize: 12 }}>▶</Text>
     </TouchableOpacity>
   </View>
 );
 
 export default function RecommendScreen() {
+  const { play } = useContext(PlayerContext);
   const [activeFilter, setActiveFilter] = useState('전체');
 
   const filtered = activeFilter === '전체'
     ? MOCK_DATA
     : MOCK_DATA.filter((r) => r.type === FILTER_MAP[activeFilter]);
+
+  const handlePlay = async (song) => {
+    const queue = filtered.flatMap((section) => section.songs);
+    const selectedIndex = queue.findIndex((item) => item.id === song.id);
+    const orderedQueue = selectedIndex >= 0
+      ? queue.slice(selectedIndex).concat(queue.slice(0, selectedIndex))
+      : [song];
+
+    try {
+      await play(song, orderedQueue);
+    } catch (error) {
+      Alert.alert('Spotify 재생 실패', error.message || 'Spotify로 곡을 열지 못했습니다.');
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -71,7 +87,7 @@ export default function RecommendScreen() {
         {filtered.map((section) => (
           <View key={section.type} style={styles.section}>
             <Text style={styles.sectionLabel}>{section.label}</Text>
-            {section.songs.map((song) => <SongRow key={song.id} song={song} />)}
+            {section.songs.map((song) => <SongRow key={song.id} song={song} onPlay={handlePlay} />)}
           </View>
         ))}
         <View style={{ height: 20 }} />

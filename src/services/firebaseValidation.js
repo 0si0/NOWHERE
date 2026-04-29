@@ -47,7 +47,7 @@ function cleanPlaylist(rawPlaylist = {}) {
   const title = cleanOptionalText(rawPlaylist.title, '플레이리스트 제목', 120);
   const playlistId = cleanOptionalText(rawPlaylist.playlistId, '플레이리스트 ID', 120);
   const artworkUrl = cleanOptionalText(rawPlaylist.artworkUrl, '플레이리스트 이미지 URL', 500);
-  const provider = ['appleMusic', 'spotify', 'unknown'].includes(rawPlaylist.provider)
+  const provider = ['spotify', 'unknown'].includes(rawPlaylist.provider)
     ? rawPlaylist.provider
     : 'unknown';
 
@@ -158,7 +158,7 @@ export function sanitizePlayRecordInput(input) {
     title: cleanText(input.title, '곡 제목', { max: 160 }),
     artist: cleanText(input.artist, '아티스트명', { max: 160 }),
     albumArtUrl: cleanOptionalText(input.albumArtUrl, '앨범 이미지 URL', 500),
-    provider: ['appleMusic', 'spotify', 'manual', 'unknown'].includes(input.provider)
+    provider: ['spotify', 'manual', 'unknown'].includes(input.provider)
       ? input.provider
       : 'unknown',
     placeName: cleanOptionalText(input.placeName, '장소 이름', 80),
@@ -191,7 +191,7 @@ export function sanitizeVibePayload(input) {
     trackId: cleanOptionalText(input.trackId, '트랙 ID', 160),
     trackTitle: cleanText(input.trackTitle, '곡 제목', { max: 160 }),
     trackArtist: cleanText(input.trackArtist, '아티스트명', { max: 160 }),
-    provider: ['appleMusic', 'spotify', 'unknown'].includes(input.provider)
+    provider: ['spotify', 'unknown'].includes(input.provider)
       ? input.provider
       : 'unknown',
   };

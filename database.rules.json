@@ -30,7 +30,7 @@
             ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 160"
           },
           "provider": {
-            ".validate": "newData.isString() && (newData.val() === 'appleMusic' || newData.val() === 'spotify' || newData.val() === 'unknown')"
+            ".validate": "newData.isString() && (newData.val() === 'spotify' || newData.val() === 'unknown')"
           },
           "createdAt": {
             ".validate": true

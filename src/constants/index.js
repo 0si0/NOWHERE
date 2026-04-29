@@ -3,11 +3,15 @@ export { COLORS } from './colors';
 const env = process.env;
 
 // Firebase client config values are safe to ship in the app bundle.
-// Secrets such as Claude API keys should stay in Cloud Functions only.
+// Secrets such as OpenAI API keys should stay in Cloud Functions only.
 export const API_KEYS = {
   OPENWEATHER: env.EXPO_PUBLIC_OPENWEATHER_API_KEY || 'YOUR_OPENWEATHER_API_KEY',
   KAKAO_MAPS: env.EXPO_PUBLIC_KAKAO_MAPS_API_KEY || 'YOUR_KAKAO_MAPS_API_KEY',
-  CLAUDE: '',
+  OPENAI: '',
+  SPOTIFY: {
+    clientId: env.EXPO_PUBLIC_SPOTIFY_CLIENT_ID || '',
+    redirectUri: env.EXPO_PUBLIC_SPOTIFY_REDIRECT_URI || 'com.nowhere.nowhere://spotify-auth',
+  },
   FIREBASE: {
     apiKey: env.EXPO_PUBLIC_FIREBASE_API_KEY || 'YOUR_FIREBASE_API_KEY',
     authDomain: env.EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN || 'YOUR_PROJECT.firebaseapp.com',
@@ -29,7 +33,6 @@ export const RADIUS_OPTIONS = [100, 200, 300, 500];
 
 export const PLAYLIST_PROVIDERS = [
   { value: 'unknown', label: '미정' },
-  { value: 'appleMusic', label: 'Apple Music' },
   { value: 'spotify', label: 'Spotify' },
 ];
 

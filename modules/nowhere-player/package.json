@@ -1,0 +1,7 @@
+{
+  "name": "nowhere-player",
+  "version": "1.0.0",
+  "description": "Native Spotify playback bridge for NOWHERE.",
+  "main": "src/index.js",
+  "private": true
+}

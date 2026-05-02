@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>NOWHERE Kakao Map</title>
+  <style>
+    html, body, #map {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background: #111;
+      overflow: hidden;
+    }
+    .hud {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      z-index: 10;
+      border-radius: 14px;
+      padding: 10px 12px;
+      background: rgba(10,10,10,0.72);
+      color: #f5f5f5;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      font-size: 12px;
+      line-height: 16px;
+      pointer-events: none;
+      border: 1px solid rgba(255,255,255,0.16);
+    }
+    .center {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      box-sizing: border-box;
+      color: #f5f5f5;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      text-align: center;
+      background: #111;
+    }
+    .spinner {
+      width: 26px;
+      height: 26px;
+      border: 3px solid rgba(255,255,255,0.18);
+      border-top-color: #ff9c9c;
+      border-radius: 50%;
+      margin: 0 auto 12px;
+      animation: spin 0.8s linear infinite;
+    }
+    .error {
+      font-size: 13px;
+      line-height: 19px;
+      color: #ffb4b4;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="loading" class="center">
+    <div>
+      <div class="spinner"></div>
+      <div>Kakao 지도를 불러오는 중...</div>
+    </div>
+  </div>
+  <div class="hud">지도를 움직이거나 지점을 탭해서 자동재생 위치를 고르세요.</div>
+  <script>
+    var params = new URLSearchParams(window.location.search);
+    var appkey = params.get('appkey') || '';
+    var latitude = Number(params.get('lat')) || 37.5665;
+    var longitude = Number(params.get('lng')) || 126.978;
+    var radiusMeters = Number(params.get('radius')) || 200;
+    var map;
+    var marker;
+    var circle;
+
+    function post(payload) {
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+      }
+    }
+
+    function postLatLng(type, latlng) {
+      post({
+        type: type,
+        latitude: latlng.getLat(),
+        longitude: latlng.getLng(),
+        href: window.location.href,
+        origin: window.location.origin
+      });
+    }
+
+    function showError(message) {
+      var loading = document.getElementById('loading');
+      if (loading) {
+        loading.innerHTML = '<div class="error">' + message + '<br />Kakao Developers에서 [앱] > [제품 설정] > [카카오맵] 사용 설정을 ON으로 바꾸고, JavaScript SDK 도메인에 ' + window.location.origin + ' 을 등록하세요.</div>';
+      }
+      post({
+        type: 'error',
+        message: message,
+        href: window.location.href,
+        origin: window.location.origin
+      });
+    }
+
+    function select(latlng, source) {
+      marker.setPosition(latlng);
+      circle.setPosition(latlng);
+      map.panTo(latlng);
+      postLatLng(source || 'select', latlng);
+    }
+
+    window.nowhereMoveTo = function(nextLatitude, nextLongitude, nextRadius) {
+      if (!window.kakao || !map || !marker || !circle) {
+        return;
+      }
+      var next = new kakao.maps.LatLng(nextLatitude, nextLongitude);
+      marker.setPosition(next);
+      circle.setPosition(next);
+      circle.setRadius(nextRadius || radiusMeters);
+      map.panTo(next);
+    };
+
+    function initMap() {
+      if (!window.kakao || !window.kakao.maps) {
+        showError('Kakao 지도 SDK가 로드되지 않았습니다.');
+        return;
+      }
+
+      kakao.maps.load(function() {
+        var selected = new kakao.maps.LatLng(latitude, longitude);
+        map = new kakao.maps.Map(document.getElementById('map'), {
+          center: selected,
+          level: 3
+        });
+        marker = new kakao.maps.Marker({
+          map: map,
+          position: selected,
+          draggable: true
+        });
+        circle = new kakao.maps.Circle({
+          map: map,
+          center: selected,
+          radius: radiusMeters,
+          strokeWeight: 2,
+          strokeColor: '#ff9c9c',
+          strokeOpacity: 0.9,
+          fillColor: '#ff9c9c',
+          fillOpacity: 0.18
+        });
+
+        var loading = document.getElementById('loading');
+        if (loading) {
+          loading.style.display = 'none';
+        }
+
+        kakao.maps.event.addListener(map, 'click', function(mouseEvent) {
+          select(mouseEvent.latLng, 'mapClick');
+        });
+        kakao.maps.event.addListener(marker, 'dragend', function() {
+          select(marker.getPosition(), 'markerDrag');
+        });
+        kakao.maps.event.addListener(map, 'idle', function() {
+          postLatLng('mapIdle', map.getCenter());
+        });
+        postLatLng('ready', selected);
+      });
+    }
+
+    if (!appkey) {
+      showError('Kakao JavaScript 키가 전달되지 않았습니다.');
+    } else {
+      var script = document.createElement('script');
+      script.src = 'https://dapi.kakao.com/v2/maps/sdk.js?appkey=' + encodeURIComponent(appkey) + '&autoload=false';
+      script.onload = initMap;
+      script.onerror = function() {
+        showError('Kakao 지도 SDK 파일을 불러오지 못했습니다. 카카오맵 서비스가 꺼져 있거나 도메인이 등록되지 않았습니다.');
+      };
+      document.head.appendChild(script);
+    }
+  </script>
+</body>
+</html>

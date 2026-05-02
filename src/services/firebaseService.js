@@ -35,6 +35,7 @@ import {
   getFirebaseRuntimeStatus as getFirebaseRuntimeStatusFromClient,
   isFirebaseConfigured as isFirebaseConfiguredInClient,
 } from './firebaseClient';
+import { MAX_AUTOPLAY_PLACES } from '../constants';
 import {
   buildUserProfileDocument,
   sanitizeConsentInput,
@@ -42,6 +43,7 @@ import {
   sanitizeSavedPlaceInput,
   sanitizeVibePayload,
 } from './firebaseValidation';
+import { cacheAutoPlayPlaces } from './autoPlayService';
 
 const SESSION_ID_KEY = '@nowhere/session-id';
 const LOCAL_APP_USER_ID_KEY = '@nowhere/local-app-user-id';
@@ -85,6 +87,35 @@ async function writeLocalSavedPlaces(places) {
 
 function buildLocalSavedPlaceId() {
   return `local-place-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isPermissionDeniedError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return error?.code === 'permission-denied' ||
+    error?.code === 'firestore/permission-denied' ||
+    message.includes('missing or insufficient permissions') ||
+    message.includes('permission-denied');
+}
+
+async function saveLocalSavedPlaceDocument(sanitized, overrides = {}) {
+  const savedPlaces = await readLocalSavedPlaces();
+  const activeCount = savedPlaces.filter((item) => item.userId === sanitized.userId && item.status !== 'archived').length;
+  if (activeCount >= MAX_AUTOPLAY_PLACES) {
+    throw new Error(`자동재생 장소는 한 사람당 최대 ${MAX_AUTOPLAY_PLACES}개까지 저장할 수 있습니다.`);
+  }
+  const now = new Date().toISOString();
+  const nextPlace = {
+    id: buildLocalSavedPlaceId(),
+    ...sanitized,
+    syncStatus: 'localOnly',
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+
+  await writeLocalSavedPlaces([...savedPlaces, nextPlace]);
+  await cacheAutoPlayPlaces([...savedPlaces, nextPlace]);
+  return nextPlace;
 }
 
 function getUserDocumentRef(db, userId) {
@@ -207,21 +238,16 @@ export async function saveSavedPlace(input) {
   });
 
   if (!isFirebaseConfiguredInClient()) {
-    const savedPlaces = await readLocalSavedPlaces();
-    const now = new Date().toISOString();
-    const nextPlace = {
-      id: buildLocalSavedPlaceId(),
-      ...sanitized,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    await writeLocalSavedPlaces([...savedPlaces, nextPlace]);
-    return nextPlace;
+    return saveLocalSavedPlaceDocument(sanitized);
   }
 
   const { auth, db } = assertFirebaseConfigured();
   const userId = assertAuthenticatedUser(auth, sanitized.userId);
+  const existingPlaces = await getSavedPlaces(userId);
+  const activeCount = existingPlaces.filter((item) => item.status !== 'archived').length;
+  if (activeCount >= MAX_AUTOPLAY_PLACES) {
+    throw new Error(`자동재생 장소는 한 사람당 최대 ${MAX_AUTOPLAY_PLACES}개까지 저장할 수 있습니다.`);
+  }
   const docRef = doc(getSavedPlacesCollection(db, userId));
 
   const payload = {
@@ -230,7 +256,16 @@ export async function saveSavedPlace(input) {
     updatedAt: serverTimestamp(),
   };
 
-  await setDoc(docRef, payload);
+  try {
+    await setDoc(docRef, payload);
+  } catch (error) {
+    if (isPermissionDeniedError(error)) {
+      return saveLocalSavedPlaceDocument(sanitized, {
+        remoteError: 'permission-denied',
+      });
+    }
+    throw error;
+  }
 
   return { id: docRef.id, ...sanitized };
 }
@@ -240,23 +275,44 @@ export async function getSavedPlaces(userId) {
 
   if (!isFirebaseConfiguredInClient()) {
     const savedPlaces = await readLocalSavedPlaces();
-    return sortByUpdatedAtDescending(
+    const sortedPlaces = sortByUpdatedAtDescending(
       savedPlaces.filter((item) => item.userId === ownerId)
     );
+    await cacheAutoPlayPlaces(sortedPlaces);
+    return sortedPlaces;
   }
 
-  const { auth, db } = assertFirebaseConfigured();
-  const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
-  const placesQuery = query(
-    getSavedPlacesCollection(db, validatedOwnerId),
-    orderBy('updatedAt', 'desc')
-  );
-  const snapshot = await getDocs(placesQuery);
+  try {
+    const { auth, db } = assertFirebaseConfigured();
+    const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
+    const placesQuery = query(
+      getSavedPlacesCollection(db, validatedOwnerId),
+      orderBy('updatedAt', 'desc')
+    );
+    const snapshot = await getDocs(placesQuery);
 
-  return snapshot.docs.map((item) => ({
-    id: item.id,
-    ...item.data(),
-  }));
+    const remotePlaces = snapshot.docs.map((item) => ({
+      id: item.id,
+      ...item.data(),
+    }));
+    const localPlaces = await readLocalSavedPlaces();
+    const mergedPlaces = sortByUpdatedAtDescending([
+      ...remotePlaces,
+      ...localPlaces.filter((item) => item.userId === validatedOwnerId),
+    ]);
+    await cacheAutoPlayPlaces(mergedPlaces);
+    return mergedPlaces;
+  } catch (error) {
+    if (isPermissionDeniedError(error)) {
+      const savedPlaces = await readLocalSavedPlaces();
+      const sortedPlaces = sortByUpdatedAtDescending(
+        savedPlaces.filter((item) => item.userId === ownerId)
+      );
+      await cacheAutoPlayPlaces(sortedPlaces);
+      return sortedPlaces;
+    }
+    throw error;
+  }
 }
 
 export async function updateSavedPlace(placeId, input) {
@@ -281,6 +337,7 @@ export async function updateSavedPlace(placeId, input) {
     });
 
     await writeLocalSavedPlaces(nextPlaces);
+    await cacheAutoPlayPlaces(nextPlaces.filter((item) => item.userId === sanitized.userId));
     return nextPlaces.find((item) => item.id === placeId) || null;
   }
 
@@ -288,10 +345,36 @@ export async function updateSavedPlace(placeId, input) {
   const userId = assertAuthenticatedUser(auth, sanitized.userId);
   const placeRef = doc(getSavedPlacesCollection(db, userId), placeId);
 
-  await setDoc(placeRef, {
-    ...sanitized,
-    updatedAt: serverTimestamp(),
-  }, { merge: true });
+  try {
+    await setDoc(placeRef, {
+      ...sanitized,
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  } catch (error) {
+    if (isPermissionDeniedError(error)) {
+      const savedPlaces = await readLocalSavedPlaces();
+      const now = new Date().toISOString();
+      const existing = savedPlaces.find((item) => item.id === placeId && item.userId === sanitized.userId);
+      const nextPlaces = existing
+        ? savedPlaces.map((item) => (
+          item.id === placeId && item.userId === sanitized.userId
+            ? { ...item, ...sanitized, syncStatus: 'localOnly', remoteError: 'permission-denied', updatedAt: now }
+            : item
+        ))
+        : [...savedPlaces, {
+          id: placeId,
+          ...sanitized,
+          syncStatus: 'localOnly',
+          remoteError: 'permission-denied',
+          createdAt: now,
+          updatedAt: now,
+        }];
+      await writeLocalSavedPlaces(nextPlaces);
+      await cacheAutoPlayPlaces(nextPlaces.filter((item) => item.userId === sanitized.userId));
+      return nextPlaces.find((item) => item.id === placeId) || null;
+    }
+    throw error;
+  }
 
   const snapshot = await getDoc(placeRef);
   return { id: snapshot.id, ...snapshot.data() };
@@ -315,6 +398,7 @@ export async function archiveSavedPlace(userId, placeId) {
     });
 
     await writeLocalSavedPlaces(nextPlaces);
+    await cacheAutoPlayPlaces(nextPlaces.filter((item) => item.userId === ownerId));
     return;
   }
 
@@ -322,10 +406,33 @@ export async function archiveSavedPlace(userId, placeId) {
   const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
   const placeRef = doc(getSavedPlacesCollection(db, validatedOwnerId), placeId);
 
-  await updateDoc(placeRef, {
-    status: 'archived',
-    updatedAt: serverTimestamp(),
-  });
+  try {
+    await updateDoc(placeRef, {
+      status: 'archived',
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    if (isPermissionDeniedError(error)) {
+      const savedPlaces = await readLocalSavedPlaces();
+      const nextPlaces = savedPlaces.map((item) => {
+        if (item.id !== placeId || item.userId !== ownerId) {
+          return item;
+        }
+
+        return {
+          ...item,
+          status: 'archived',
+          syncStatus: 'localOnly',
+          remoteError: 'permission-denied',
+          updatedAt: new Date().toISOString(),
+        };
+      });
+      await writeLocalSavedPlaces(nextPlaces);
+      await cacheAutoPlayPlaces(nextPlaces.filter((item) => item.userId === ownerId));
+      return;
+    }
+    throw error;
+  }
 }
 
 export async function savePlayRecord(input) {

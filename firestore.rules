@@ -38,6 +38,47 @@ service cloud.firestore {
         isShortString(data.artworkUrl, 500);
     }
 
+    function isNullableString(value, maxLength) {
+      return value == null || isShortString(value, maxLength);
+    }
+
+    function isPlayTargetMap(data) {
+      return data == null || (
+        data.keys().hasAll([
+          'type',
+          'provider',
+          'id',
+          'spotifyUri',
+          'title',
+          'artist',
+          'album',
+          'artworkUrl',
+          'durationMs'
+        ]) &&
+        data.keys().hasOnly([
+          'type',
+          'provider',
+          'id',
+          'spotifyUri',
+          'title',
+          'artist',
+          'album',
+          'artworkUrl',
+          'durationMs'
+        ]) &&
+        (data.type == 'track' || data.type == 'playlist') &&
+        (data.provider == 'spotify' || data.provider == 'unknown') &&
+        isShortString(data.id, 180) &&
+        isNullableString(data.spotifyUri, 240) &&
+        isShortString(data.title, 160) &&
+        isNullableString(data.artist, 160) &&
+        isNullableString(data.album, 160) &&
+        isNullableString(data.artworkUrl, 500) &&
+        isNumber(data.durationMs) &&
+        data.durationMs >= 0
+      );
+    }
+
     function isSavedPlace(data, userId) {
       return data.keys().hasAll([
         'userId',
@@ -46,6 +87,7 @@ service cloud.firestore {
         'coordinates',
         'geohash',
         'playlist',
+        'playTarget',
         'weatherRules',
         'timeRules',
         'status',
@@ -60,6 +102,7 @@ service cloud.firestore {
         'coordinates',
         'geohash',
         'playlist',
+        'playTarget',
         'weatherRules',
         'timeRules',
         'status',
@@ -69,10 +112,11 @@ service cloud.firestore {
       ]) &&
         data.userId == userId &&
         isShortString(data.name, 60) &&
-        (data.radiusMeters == 100 || data.radiusMeters == 200 || data.radiusMeters == 300 || data.radiusMeters == 500) &&
+        (data.radiusMeters == 50 || data.radiusMeters == 100 || data.radiusMeters == 200 || data.radiusMeters == 300) &&
         isCoordinatesMap(data.coordinates) &&
         isShortString(data.geohash, 12) &&
         isPlaylistMap(data.playlist) &&
+        isPlayTargetMap(data.playTarget) &&
         data.weatherRules is list &&
         data.weatherRules.size() <= 8 &&
         data.timeRules is list &&

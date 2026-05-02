@@ -133,6 +133,9 @@ export default function HomeScreen({ navigation }) {
     hasForegroundPermission,
     isLocating,
     locationError,
+    autoPlayModeEnabled,
+    setAutoPlayModeEnabled,
+    prepareAutoPlayMode,
     requestPermissions,
   } = useContext(LocationContext);
   const { width, height } = useWindowDimensions();
@@ -258,14 +261,47 @@ export default function HomeScreen({ navigation }) {
     setIsActionPanelOpen(true);
   };
 
+  const handleToggleAutoPlayMode = () => {
+    if (autoPlayModeEnabled) {
+      setAutoPlayModeEnabled(false).catch((error) => {
+        Alert.alert('자동재생 설정 실패', error.message || '자동재생 모드를 끄지 못했습니다.');
+      });
+      return;
+    }
+
+    Alert.alert(
+      '자동재생 모드 ON',
+      '자동재생을 사용하기 위해 Spotify를 실행합니다.',
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '실행',
+          onPress: async () => {
+            try {
+              await prepareAutoPlayMode();
+            } catch (error) {
+              Alert.alert('Spotify 실행 실패', error.message || 'Spotify를 실행하지 못했습니다.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.backdrop} />
       <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
         <View style={[styles.topBar, { paddingHorizontal: sideInset }]}>
           <Text style={styles.logo}>NOWHERE</Text>
-          <TouchableOpacity style={styles.tuneButton} activeOpacity={0.8}>
-            <Ionicons name="options-outline" size={28} color="#FFD2C9" />
+          <TouchableOpacity
+            style={[styles.autoPlayToggle, autoPlayModeEnabled && styles.autoPlayToggleActive]}
+            activeOpacity={0.82}
+            onPress={handleToggleAutoPlayMode}
+          >
+            <Text style={[styles.autoPlayToggleText, autoPlayModeEnabled && styles.autoPlayToggleTextActive]}>
+              {autoPlayModeEnabled ? 'AUTO ON' : 'AUTO OFF'}
+            </Text>
           </TouchableOpacity>
         </View>
 
@@ -400,11 +436,28 @@ const styles = StyleSheet.create({
     fontWeight: '300',
     letterSpacing: 8,
   },
-  tuneButton: {
-    width: 44,
-    height: 44,
+  autoPlayToggle: {
+    minWidth: 76,
+    height: 36,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 210, 201, 0.45)',
+    backgroundColor: 'rgba(39, 32, 33, 0.72)',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  autoPlayToggleActive: {
+    borderColor: '#31D97C',
+    backgroundColor: 'rgba(49, 217, 124, 0.22)',
+  },
+  autoPlayToggleText: {
+    color: '#FFD2C9',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  autoPlayToggleTextActive: {
+    color: '#6CFFA6',
   },
   contextRow: {
     position: 'absolute',

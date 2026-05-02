@@ -33,5 +33,14 @@
       "enabled": true,
       "port": 4000
     }
+  },
+  "hosting": {
+    "site": "nowhere-a5e09",
+    "public": "hosting",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ]
   }
 }

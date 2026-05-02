@@ -59,6 +59,37 @@ function cleanPlaylist(rawPlaylist = {}) {
   };
 }
 
+function cleanPlayTarget(rawTarget = {}) {
+  const title = cleanOptionalText(rawTarget.title || rawTarget.name, '곡 제목', 160);
+  const artist = cleanOptionalText(rawTarget.artist || rawTarget.artistName, '아티스트명', 160);
+  const spotifyUri = cleanOptionalText(rawTarget.spotifyUri || rawTarget.uri, 'Spotify URI', 240);
+  const id = cleanOptionalText(rawTarget.id || spotifyUri, '트랙 ID', 180);
+  const album = cleanOptionalText(rawTarget.album || rawTarget.albumTitle, '앨범명', 160);
+  const artworkUrl = cleanOptionalText(rawTarget.artworkUrl || rawTarget.albumArtUrl, '앨범 이미지 URL', 500);
+  const durationMs = isNumeric(rawTarget.durationMs) && rawTarget.durationMs >= 0
+    ? Math.round(rawTarget.durationMs)
+    : 0;
+  const provider = rawTarget.provider === 'spotify' ? 'spotify' : 'unknown';
+
+  if (!title && !artist && !spotifyUri && !id && !artworkUrl) {
+    return null;
+  }
+
+  invariant(title || spotifyUri || id, '자동재생할 곡 정보를 선택해주세요.');
+
+  return {
+    type: rawTarget.type === 'playlist' ? 'playlist' : 'track',
+    provider,
+    id: id || spotifyUri || title,
+    spotifyUri,
+    title: title || '선택한 곡',
+    artist,
+    album,
+    artworkUrl,
+    durationMs,
+  };
+}
+
 function cleanWeatherRules(weatherRules = []) {
   invariant(Array.isArray(weatherRules), '날씨 규칙 형식이 올바르지 않습니다.');
   invariant(weatherRules.length <= 8, '날씨 규칙은 최대 8개까지 저장할 수 있습니다.');
@@ -126,6 +157,7 @@ export function buildUserProfileDocument(user) {
 export function sanitizeSavedPlaceInput(input) {
   const latitude = cleanLatitude(input.latitude);
   const longitude = cleanLongitude(input.longitude);
+  const playTarget = cleanPlayTarget(input.playTarget);
 
   return {
     userId: cleanText(input.userId, '사용자 ID', { max: 128 }),
@@ -137,6 +169,7 @@ export function sanitizeSavedPlaceInput(input) {
     },
     geohash: encodeGeohash(latitude, longitude),
     playlist: cleanPlaylist(input.playlist),
+    playTarget,
     weatherRules: cleanWeatherRules(input.weatherRules),
     timeRules: cleanTimeRules(input.timeRules),
     status: input.status === 'archived' ? 'archived' : 'active',

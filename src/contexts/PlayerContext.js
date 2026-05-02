@@ -94,6 +94,38 @@ export function PlayerProvider({ children }) {
     return result;
   }, []);
 
+  const prepareAutoPlay = useCallback(async (primerTrack = null) => {
+    const state = await musicPlayerService.prepareAutoPlay(primerTrack);
+    applyState(state);
+    return state;
+  }, [applyState]);
+
+  const playInBackground = useCallback(async (track, trackQueue = []) => {
+    const normalizedTrack = musicPlayerService.normalizeTrack(track);
+    const normalizedQueue = musicPlayerService.normalizeQueue(trackQueue.length ? trackQueue : [track]);
+    setPlayerState((prev) => ({
+      ...prev,
+      error: null,
+      playbackStatus: 'loading',
+      queue: prev.queue,
+      currentTrack: prev.currentTrack,
+    }));
+
+    try {
+      const state = await musicPlayerService.playInBackground(normalizedTrack, normalizedQueue);
+      applyState(state);
+      return state;
+    } catch (error) {
+      setPlayerState((prev) => ({
+        ...prev,
+        isPlaying: false,
+        playbackStatus: 'error',
+        error: error.message,
+      }));
+      throw error;
+    }
+  }, [applyState]);
+
   const pause = useCallback(async () => {
     try {
       const state = await musicPlayerService.pause();
@@ -227,8 +259,10 @@ export function PlayerProvider({ children }) {
     playerStatus: playerState,
     playerState,
     play,
+    playInBackground,
     pause,
     resume,
+    prepareAutoPlay,
     requestAuthorization,
     togglePlay,
     skipNext,
@@ -241,8 +275,10 @@ export function PlayerProvider({ children }) {
   }), [
     playerState,
     play,
+    playInBackground,
     pause,
     resume,
+    prepareAutoPlay,
     requestAuthorization,
     togglePlay,
     skipNext,

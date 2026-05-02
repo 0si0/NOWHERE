@@ -15,17 +15,20 @@ function getProvider() {
   return 'mock';
 }
 
-function getNativeOptions() {
+function getNativeOptions(extraOptions = {}) {
   return {
     provider: getProvider(),
     spotifyClientId: API_KEYS.SPOTIFY.clientId,
     spotifyRedirectUri: API_KEYS.SPOTIFY.redirectUri,
+    ...extraOptions,
   };
 }
 
 function normalizeTrack(track = {}) {
+  const type = track.type === 'playlist' ? 'playlist' : 'track';
   return {
     id: track.id || track.spotifyUri || `${track.title || 'track'}-${track.artist || ''}`,
+    type,
     title: track.title || track.name || 'Unknown Track',
     artist: track.artist || track.artistName || 'Unknown Artist',
     album: track.album || track.albumTitle || '',
@@ -35,6 +38,8 @@ function normalizeTrack(track = {}) {
     provider: track.provider || getProvider(),
     spotifyUri: track.spotifyUri || (typeof track.uri === 'string' && track.uri.startsWith('spotify:') ? track.uri : ''),
     uri: track.uri || '',
+    trackCount: track.trackCount || 0,
+    ownerName: track.ownerName || '',
   };
 }
 
@@ -60,6 +65,16 @@ function mergeNativeState(state = {}) {
     merged.queue = normalizeQueue(state.queue);
   }
   return merged;
+}
+
+function buildPlaybackFailure(state = {}) {
+  if (state.requiresActiveDevice || state.playbackStatus === 'noActiveDevice') {
+    return new Error('Spotify 활성 기기를 찾지 못했습니다. AUTO ON을 다시 눌러 Spotify 자동 활성화를 먼저 실행해주세요.');
+  }
+  if (state.playbackStatus === 'playbackError' || state.error) {
+    return new Error(state.error || 'Spotify 재생 요청이 실패했습니다.');
+  }
+  return null;
 }
 
 async function maybeResolvePlayableTrack(track) {
@@ -132,12 +147,36 @@ export const musicPlayerService = {
     return mergeNativeState(state);
   },
 
+  async prepareAutoPlay(primerTrack = null) {
+    if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.prepareAutoPlayAsync) {
+      return mergeNativeState({ provider: 'mock', available: false, playbackStatus: 'preparingAutoPlay' });
+    }
+
+    if ((Platform.OS === 'ios' || Platform.OS === 'android') && !API_KEYS.SPOTIFY.clientId) {
+      return { provider: 'spotify', authorized: false, status: 'missingClientId' };
+    }
+
+    const playablePrimerTrack = primerTrack ? await maybeResolvePlayableTrack(primerTrack) : null;
+    const state = await NativeNowherePlayer.prepareAutoPlayAsync(getNativeOptions({
+      autoPlayPrimer: playablePrimerTrack,
+    }));
+    return mergeNativeState(state);
+  },
+
   async search(query, limit = 5) {
     if (!isNativeNowherePlayerAvailable || !query) {
       return [];
     }
     const results = await NativeNowherePlayer.searchCatalogAsync(query, limit);
     return (results || []).map(normalizeTrack);
+  },
+
+  async getUserPlaylists(limit = 20) {
+    if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.getUserPlaylistsAsync) {
+      return [];
+    }
+    const results = await NativeNowherePlayer.getUserPlaylistsAsync(Math.max(1, Math.min(limit, 50)));
+    return (results || []).map((item) => normalizeTrack({ ...item, type: 'playlist' }));
   },
 
   async play(track, queue = []) {
@@ -162,6 +201,33 @@ export const musicPlayerService = {
     );
     const state = await NativeNowherePlayer.playAsync(playableTrack, playableQueue);
     return mergeNativeState(state);
+  },
+
+  async playInBackground(track, queue = []) {
+    const requestedQueue = normalizeQueue(queue.length ? queue : [track]);
+
+    if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.playInBackgroundAsync) {
+      return mergeNativeState({
+        provider: 'mock',
+        available: false,
+        isPlaying: true,
+        currentTrack: normalizeTrack(track),
+        queue: requestedQueue,
+        playbackStatus: 'playing',
+      });
+    }
+
+    const playableTrack = await maybeResolvePlayableTrack(track);
+    const playableQueue = await Promise.all(
+      requestedQueue.map((queuedTrack) => maybeResolvePlayableTrack(queuedTrack))
+    );
+    const state = await NativeNowherePlayer.playInBackgroundAsync(playableTrack, playableQueue);
+    const mergedState = mergeNativeState(state);
+    const failure = buildPlaybackFailure(mergedState);
+    if (failure) {
+      throw failure;
+    }
+    return mergedState;
   },
 
   async pause() {

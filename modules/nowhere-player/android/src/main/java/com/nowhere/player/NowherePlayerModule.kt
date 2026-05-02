@@ -20,6 +20,7 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -39,6 +40,8 @@ class NowherePlayerModule : Module() {
   private var positionMs: Long = 0L
   private var playbackStatus: String = "idle"
   private var authPromise: Promise? = null
+  private var shouldOpenSpotifyAfterAuth: Boolean = false
+  private var pendingAutoPlayPrimerUri: String? = null
 
   override fun definition() = ModuleDefinition {
     Name("NowherePlayer")
@@ -63,6 +66,13 @@ class NowherePlayerModule : Module() {
       when (response.type) {
         AuthorizationResponse.Type.TOKEN -> {
           accessToken = response.accessToken
+          if (shouldOpenSpotifyAfterAuth) {
+            shouldOpenSpotifyAfterAuth = false
+            playbackStatus = "preparingAutoPlay"
+            launchSpotifyUri(pendingAutoPlayPrimerUri ?: "spotify:")
+            pendingAutoPlayPrimerUri = null
+            emitState()
+          }
           promise.resolve(
             mapOf(
               "provider" to "spotify",
@@ -73,9 +83,13 @@ class NowherePlayerModule : Module() {
           )
         }
         AuthorizationResponse.Type.ERROR -> {
+          shouldOpenSpotifyAfterAuth = false
+          pendingAutoPlayPrimerUri = null
           promise.reject("ERR_SPOTIFY_AUTH", response.error ?: "Spotify authorization failed.", null)
         }
         else -> {
+          shouldOpenSpotifyAfterAuth = false
+          pendingAutoPlayPrimerUri = null
           promise.reject("ERR_SPOTIFY_AUTH_CANCELLED", "Spotify authorization was cancelled.", null)
         }
       }
@@ -111,7 +125,14 @@ class NowherePlayerModule : Module() {
 
       authPromise = promise
       val request = AuthorizationRequest.Builder(clientId, AuthorizationResponse.Type.TOKEN, redirectUri)
-        .setScopes(arrayOf("app-remote-control", "streaming", "user-read-playback-state", "user-modify-playback-state"))
+        .setScopes(arrayOf(
+          "app-remote-control",
+          "streaming",
+          "user-read-playback-state",
+          "user-modify-playback-state",
+          "playlist-read-private",
+          "playlist-read-collaborative"
+        ))
         .setShowDialog(false)
         .build()
       AuthorizationClient.openLoginActivity(activity, SPOTIFY_AUTH_REQUEST_CODE, request)
@@ -124,6 +145,73 @@ class NowherePlayerModule : Module() {
 
     AsyncFunction("searchCatalogAsync") Coroutine { query: String, limit: Int ->
       return@Coroutine searchSpotifyTracks(query, limit.coerceIn(1, 25))
+    }
+
+    AsyncFunction("getUserPlaylistsAsync") Coroutine { limit: Int ->
+      return@Coroutine getUserSpotifyPlaylists(limit.coerceIn(1, 50))
+    }
+
+    AsyncFunction("prepareAutoPlayAsync") { options: Map<String, Any?>, promise: Promise ->
+      applyOptions(options)
+      @Suppress("UNCHECKED_CAST")
+      val primerUri = spotifyUriFrom(options["autoPlayPrimer"] as? Map<String, Any?> ?: emptyMap())
+      val activity = appContext.currentActivity ?: run {
+        promise.reject("ERR_ACTIVITY_UNAVAILABLE", "Current Android activity is unavailable.", null)
+        return@AsyncFunction
+      }
+
+      if (clientId.isBlank()) {
+        promise.reject("ERR_SPOTIFY_CLIENT_ID", "Spotify client id is missing.", null)
+        return@AsyncFunction
+      }
+
+      if (accessToken != null) {
+        playbackStatus = "preparingAutoPlay"
+        launchSpotifyUri(primerUri ?: "spotify:")
+        emitState()
+        promise.resolve(currentState())
+        return@AsyncFunction
+      }
+
+      shouldOpenSpotifyAfterAuth = true
+      pendingAutoPlayPrimerUri = primerUri
+      authPromise = promise
+      val request = AuthorizationRequest.Builder(clientId, AuthorizationResponse.Type.TOKEN, redirectUri)
+        .setScopes(arrayOf(
+          "app-remote-control",
+          "streaming",
+          "user-read-playback-state",
+          "user-modify-playback-state",
+          "playlist-read-private",
+          "playlist-read-collaborative"
+        ))
+        .setShowDialog(false)
+        .build()
+      AuthorizationClient.openLoginActivity(activity, SPOTIFY_AUTH_REQUEST_CODE, request)
+    }
+
+    AsyncFunction("playInBackgroundAsync") Coroutine { track: Map<String, Any?>, queue: List<Map<String, Any?>> ->
+      val tracks = if (queue.isEmpty()) listOf(track) else queue
+      val playableTrack = tracks.firstOrNull() ?: track
+      val uri = spotifyUriFrom(playableTrack)
+        ?: throw IllegalStateException("A Spotify URI is required before background playback can start.")
+
+      playbackQueue = tracks.mapNotNull { queuedTrack ->
+        spotifyUriFrom(queuedTrack)?.let { queuedUri -> mergeTrackPayload(queuedTrack, queuedUri) }
+      }
+      if (playbackQueue.isEmpty()) {
+        playbackQueue = listOf(mergeTrackPayload(playableTrack, uri))
+      }
+      currentQueueIndex = 0
+      currentTrack = playbackQueue.firstOrNull()
+      playbackStatus = "loading"
+      emitState()
+
+      startSpotifyPlayback(uri, playbackQueue)
+      isPlaying = true
+      playbackStatus = "playing"
+      emitState()
+      return@Coroutine currentState()
     }
 
     AsyncFunction("playAsync") { track: Map<String, Any?>, queue: List<Map<String, Any?>>, promise: Promise ->
@@ -361,6 +449,139 @@ class NowherePlayerModule : Module() {
           "artworkUrl" to (images?.optJSONObject(0)?.optString("url") ?: ""),
           "durationMs" to item.optLong("duration_ms")
         )
+      }
+    } finally {
+      connection.disconnect()
+    }
+  }
+
+  private suspend fun getUserSpotifyPlaylists(limit: Int): List<Map<String, Any?>> = withContext(Dispatchers.IO) {
+    val token = accessToken ?: throw IllegalStateException("Spotify authorization is required before loading playlists.")
+    val url = URL("https://api.spotify.com/v1/me/playlists?limit=$limit&offset=0")
+    val connection = (url.openConnection() as HttpURLConnection).apply {
+      requestMethod = "GET"
+      connectTimeout = 10000
+      readTimeout = 10000
+      setRequestProperty("Authorization", "Bearer $token")
+      setRequestProperty("Accept", "application/json")
+    }
+
+    try {
+      val body = if (connection.responseCode in 200..299) {
+        connection.inputStream.bufferedReader().use { it.readText() }
+      } else {
+        val error = connection.errorStream?.bufferedReader()?.use { it.readText() }
+        throw IllegalStateException(error ?: "Spotify playlists request failed with HTTP ${connection.responseCode}.")
+      }
+
+      val items = JSONObject(body).getJSONArray("items")
+      return@withContext (0 until items.length()).map { index ->
+        val item = items.getJSONObject(index)
+        val images = item.optJSONArray("images")
+        val owner = item.optJSONObject("owner")
+        val tracks = item.optJSONObject("tracks")
+        mapOf(
+          "id" to item.getString("id"),
+          "type" to "playlist",
+          "spotifyUri" to item.getString("uri"),
+          "uri" to item.getString("uri"),
+          "provider" to "spotify",
+          "title" to item.optString("name", "Spotify Playlist"),
+          "artist" to (owner?.optString("display_name") ?: "Spotify"),
+          "ownerName" to (owner?.optString("display_name") ?: ""),
+          "album" to "",
+          "artworkUrl" to (images?.optJSONObject(0)?.optString("url") ?: ""),
+          "durationMs" to 0,
+          "trackCount" to (tracks?.optInt("total") ?: 0)
+        )
+      }
+    } finally {
+      connection.disconnect()
+    }
+  }
+
+  private suspend fun startSpotifyPlayback(uri: String, queue: List<Map<String, Any?>>) = withContext(Dispatchers.IO) {
+    val deviceId = activateAvailableSpotifyDevice()
+      ?: throw IllegalStateException("NO_ACTIVE_DEVICE: No active Spotify device found.")
+    val encodedDeviceId = URLEncoder.encode(deviceId, StandardCharsets.UTF_8.name())
+    val url = URL("https://api.spotify.com/v1/me/player/play?device_id=$encodedDeviceId")
+    val body = JSONObject()
+    if (uri.startsWith("spotify:playlist:") || uri.startsWith("spotify:album:") || uri.startsWith("spotify:artist:")) {
+      body.put("context_uri", uri)
+      body.put("position_ms", 0)
+    } else {
+      val uris = JSONArray()
+      queue.mapNotNull { spotifyUriFrom(it) }
+        .filter { it.startsWith("spotify:track:") }
+        .ifEmpty { listOf(uri) }
+        .forEach { uris.put(it) }
+      body.put("uris", uris)
+      body.put("position_ms", 0)
+    }
+    spotifyRequest(url, "PUT", body)
+  }
+
+  private suspend fun activateAvailableSpotifyDevice(): String? = withContext(Dispatchers.IO) {
+    val token = accessToken ?: throw IllegalStateException("Spotify authorization is required before activating a device.")
+    val devicesUrl = URL("https://api.spotify.com/v1/me/player/devices")
+    val connection = (devicesUrl.openConnection() as HttpURLConnection).apply {
+      requestMethod = "GET"
+      connectTimeout = 10000
+      readTimeout = 10000
+      setRequestProperty("Authorization", "Bearer $token")
+      setRequestProperty("Accept", "application/json")
+    }
+
+    try {
+      val body = if (connection.responseCode in 200..299) {
+        connection.inputStream.bufferedReader().use { it.readText() }
+      } else {
+        val error = connection.errorStream?.bufferedReader()?.use { it.readText() }
+        throw IllegalStateException(error ?: "Spotify devices request failed with HTTP ${connection.responseCode}.")
+      }
+      val devices = JSONObject(body).getJSONArray("devices")
+      val candidates = (0 until devices.length())
+        .map { devices.getJSONObject(it) }
+        .filter { !it.optBoolean("is_restricted", false) && it.optString("id").isNotBlank() }
+      val selected = candidates.firstOrNull { it.optBoolean("is_active", false) }
+        ?: candidates.firstOrNull { it.optString("type").contains("smartphone", ignoreCase = true) }
+        ?: candidates.firstOrNull()
+        ?: return@withContext null
+      val deviceId = selected.optString("id")
+      val transferBody = JSONObject()
+        .put("device_ids", JSONArray().put(deviceId))
+        .put("play", false)
+      spotifyRequest(URL("https://api.spotify.com/v1/me/player"), "PUT", transferBody)
+      return@withContext deviceId
+    } finally {
+      connection.disconnect()
+    }
+  }
+
+  private fun spotifyRequest(url: URL, method: String, body: JSONObject? = null) {
+    val token = accessToken ?: throw IllegalStateException("Spotify authorization is required.")
+    val connection = (url.openConnection() as HttpURLConnection).apply {
+      requestMethod = method
+      connectTimeout = 10000
+      readTimeout = 10000
+      doInput = true
+      setRequestProperty("Authorization", "Bearer $token")
+      setRequestProperty("Accept", "application/json")
+      setRequestProperty("Content-Type", "application/json")
+      if (body != null) {
+        doOutput = true
+      }
+    }
+
+    try {
+      if (body != null) {
+        connection.outputStream.use { output ->
+          output.write(body.toString().toByteArray(StandardCharsets.UTF_8))
+        }
+      }
+      if (connection.responseCode !in 200..299) {
+        val error = connection.errorStream?.bufferedReader()?.use { it.readText() }
+        throw IllegalStateException(error ?: "Spotify request failed with HTTP ${connection.responseCode}.")
       }
     } finally {
       connection.disconnect()

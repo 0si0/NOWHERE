@@ -58,6 +58,52 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       return try await self.searchSpotifyTracks(query: query, limit: max(1, min(limit, 25)))
     }
 
+    AsyncFunction("getUserPlaylistsAsync") { (limit: Int) async throws -> [[String: Any?]] in
+      try await self.ensureAuthorized()
+      return try await self.getUserSpotifyPlaylists(limit: max(1, min(limit, 50)))
+    }
+
+    AsyncFunction("prepareAutoPlayAsync") { (options: [String: Any]) async throws -> [String: Any?] in
+      self.applyOptions(options)
+      try await self.ensureAuthorized()
+      let primerTrack = options["autoPlayPrimer"] as? [String: Any]
+      let primerUri = primerTrack.flatMap { self.spotifyUri(from: $0) }
+      self.openSpotify(uri: primerUri ?? "spotify:")
+      self.playbackStatus = "preparingAutoPlay"
+      self.lastError = nil
+      self.emitState()
+      return self.currentState()
+    }
+
+    AsyncFunction("playInBackgroundAsync") { (track: [String: Any], queue: [[String: Any]]) async throws -> [String: Any?] in
+      try await self.ensureAuthorized()
+
+      let requestedTracks = queue.isEmpty ? [track] : queue
+      let resolvedTracks = try await self.resolvePlayableTracks(requestedTracks)
+      guard let firstTrack = resolvedTracks.first, let uri = self.spotifyUri(from: firstTrack) else {
+        throw NowherePlayerException("A Spotify URI is required before background playback can start.")
+      }
+
+      self.playbackQueue = resolvedTracks
+      self.currentQueueIndex = 0
+      self.currentTrack = firstTrack
+      self.playbackStatus = "loading"
+      self.lastError = nil
+      self.emitState()
+
+      do {
+        try await self.startSpotifyPlayback(uri: uri, queue: resolvedTracks)
+        self.isPlaying = true
+        self.playbackStatus = "playing"
+        self.lastError = nil
+        await self.refreshPlayerState()
+        self.emitState()
+        return self.currentState()
+      } catch let error as SpotifyAPIError {
+        return self.playbackErrorState(error)
+      }
+    }
+
     AsyncFunction("playAsync") { (track: [String: Any], queue: [[String: Any]]) async throws -> [String: Any?] in
       try await self.ensureAuthorized()
 
@@ -195,7 +241,9 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       "app-remote-control",
       "streaming",
       "user-read-playback-state",
-      "user-modify-playback-state"
+      "user-modify-playback-state",
+      "playlist-read-private",
+      "playlist-read-collaborative"
     ].joined(separator: " ")
 
     var components = URLComponents(string: "https://accounts.spotify.com/authorize")
@@ -316,26 +364,31 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       throw NowherePlayerException("Spotify response was invalid.")
     }
 
-    if httpResponse.statusCode == 204 || data.isEmpty {
-      return nil
-    }
-
     guard (200..<300).contains(httpResponse.statusCode) else {
       throw parseSpotifyAPIError(data, statusCode: httpResponse.statusCode)
+    }
+
+    if httpResponse.statusCode == 204 || data.isEmpty {
+      return nil
     }
 
     return try parseJSONObject(data)
   }
 
-  private func activateAvailableSpotifyDevice() async throws -> Bool {
+  private func activateAvailableSpotifyDevice() async throws -> String? {
     guard let json = try await spotifyJSONRequest(path: "/v1/me/player/devices", method: "GET") else {
-      return false
+      return nil
     }
 
     let devices = json["devices"] as? [[String: Any]] ?? []
-    guard let device = devices.first(where: { ($0["is_restricted"] as? Bool) != true }),
+    let unrestrictedDevices = devices.filter { ($0["is_restricted"] as? Bool) != true }
+    let preferredDevice = unrestrictedDevices.first(where: { ($0["is_active"] as? Bool) == true })
+      ?? unrestrictedDevices.first(where: { firstString($0, keys: ["type"])?.localizedCaseInsensitiveContains("smartphone") == true })
+      ?? unrestrictedDevices.first
+
+    guard let device = preferredDevice,
           let deviceId = firstString(device, keys: ["id"]) else {
-      return false
+      return nil
     }
 
     try await spotifyRequest(
@@ -346,7 +399,37 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
         "play": false
       ]
     )
-    return true
+    return deviceId
+  }
+
+  private func startSpotifyPlayback(uri: String, queue: [[String: Any?]]) async throws {
+    guard let deviceId = try await activateAvailableSpotifyDevice() else {
+      throw SpotifyAPIError(statusCode: 404, message: "No active Spotify device found.", reason: "NO_ACTIVE_DEVICE")
+    }
+
+    let encodedDeviceId = deviceId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? deviceId
+    let path = "/v1/me/player/play?device_id=\(encodedDeviceId)"
+    if uri.starts(with: "spotify:playlist:") || uri.starts(with: "spotify:album:") || uri.starts(with: "spotify:artist:") {
+      try await spotifyRequest(
+        path: path,
+        method: "PUT",
+        body: [
+          "context_uri": uri,
+          "position_ms": 0
+        ]
+      )
+      return
+    }
+
+    let uris = queue.compactMap { spotifyUri(from: $0) }.filter { $0.starts(with: "spotify:track:") }
+    try await spotifyRequest(
+      path: path,
+      method: "PUT",
+      body: [
+        "uris": uris.isEmpty ? [uri] : uris,
+        "position_ms": 0
+      ]
+    )
   }
 
   private func searchSpotifyTracks(query: String, limit: Int) async throws -> [[String: Any?]] {
@@ -365,6 +448,18 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     let tracks = json?["tracks"] as? [String: Any]
     let items = tracks?["items"] as? [[String: Any]] ?? []
     return items.map(serializeSpotifyTrack)
+  }
+
+  private func getUserSpotifyPlaylists(limit: Int) async throws -> [[String: Any?]] {
+    var components = URLComponents()
+    components.path = "/v1/me/playlists"
+    components.queryItems = [
+      URLQueryItem(name: "limit", value: String(limit)),
+      URLQueryItem(name: "offset", value: "0")
+    ]
+    let json = try await spotifyJSONRequest(path: components.string ?? "/v1/me/playlists?limit=\(limit)&offset=0", method: "GET")
+    let items = json?["items"] as? [[String: Any]] ?? []
+    return items.map(serializeSpotifyPlaylist)
   }
 
   private func resolvePlayableTracks(_ tracks: [[String: Any]]) async throws -> [[String: Any?]] {
@@ -441,6 +536,28 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       "album": firstString(album ?? [:], keys: ["name"]) ?? "",
       "artworkUrl": firstString(images?.first ?? [:], keys: ["url"]) ?? "",
       "durationMs": item["duration_ms"] as? Int ?? 0
+    ]
+  }
+
+  private func serializeSpotifyPlaylist(_ item: [String: Any]) -> [String: Any?] {
+    let images = item["images"] as? [[String: Any]]
+    let owner = item["owner"] as? [String: Any]
+    let tracks = item["tracks"] as? [String: Any]
+    let uri = firstString(item, keys: ["uri"]) ?? ""
+
+    return [
+      "id": firstString(item, keys: ["id"]) ?? uri,
+      "type": "playlist",
+      "spotifyUri": uri,
+      "uri": uri,
+      "provider": "spotify",
+      "title": firstString(item, keys: ["name"]) ?? "Spotify Playlist",
+      "artist": firstString(owner ?? [:], keys: ["display_name"]) ?? "Spotify",
+      "ownerName": firstString(owner ?? [:], keys: ["display_name"]) ?? "",
+      "album": "",
+      "artworkUrl": firstString(images?.first ?? [:], keys: ["url"]) ?? "",
+      "durationMs": 0,
+      "trackCount": tracks?["total"] as? Int ?? 0
     ]
   }
 

@@ -19,6 +19,7 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
   private var lastError: String?
   private var authSession: ASWebAuthenticationSession?
   private let authPresentationContextProvider = AuthPresentationContextProvider()
+  private let appRemoteCoordinator = SpotifyAppRemoteCoordinator.shared
 
   public func definition() -> ModuleDefinition {
     Name("NowherePlayer")
@@ -28,6 +29,9 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     OnDestroy {
       self.authSession?.cancel()
       self.authSession = nil
+      self.appRemoteCoordinator.onPlayerState = nil
+      self.appRemoteCoordinator.onStatus = nil
+      self.appRemoteCoordinator.disconnect()
     }
 
     AsyncFunction("configureAsync") { (options: [String: Any]) -> [String: Any?] in
@@ -68,7 +72,7 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       try await self.ensureAuthorized()
       let primerTrack = options["autoPlayPrimer"] as? [String: Any]
       let primerUri = primerTrack.flatMap { self.spotifyUri(from: $0) }
-      self.openSpotify(uri: primerUri ?? "spotify:")
+      try await self.startSpotifyPlaybackWithAppRemote(uri: primerUri ?? "")
       self.playbackStatus = "preparingAutoPlay"
       self.lastError = nil
       self.emitState()
@@ -100,6 +104,22 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
         self.emitState()
         return self.currentState()
       } catch let error as SpotifyAPIError {
+        if self.isNoActiveDeviceError(error) {
+          do {
+            try await self.startSpotifyPlaybackWithAppRemote(uri: uri)
+            self.isPlaying = true
+            self.playbackStatus = "openedSpotify"
+            self.lastError = nil
+            self.emitState()
+            return self.currentState()
+          } catch {
+            return self.playbackErrorState(SpotifyAPIError(
+              statusCode: 404,
+              message: error.localizedDescription,
+              reason: "APP_REMOTE_PLAYBACK_FAILED"
+            ))
+          }
+        }
         return self.playbackErrorState(error)
       }
     }
@@ -205,6 +225,17 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     }
     if let nextRedirectUri = firstString(options, keys: ["spotifyRedirectUri", "redirectUri"]) {
       redirectUri = nextRedirectUri
+    }
+    configureAppRemote()
+  }
+
+  private func configureAppRemote() {
+    appRemoteCoordinator.configure(clientId: clientId, redirectUri: redirectUri, accessToken: accessToken)
+    appRemoteCoordinator.onPlayerState = { [weak self] payload in
+      self?.applyAppRemotePlayerState(payload)
+    }
+    appRemoteCoordinator.onStatus = { [weak self] status, error in
+      self?.applyAppRemoteStatus(status, error: error)
     }
   }
 
@@ -432,6 +463,11 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     )
   }
 
+  private func startSpotifyPlaybackWithAppRemote(uri: String) async throws {
+    configureAppRemote()
+    try await appRemoteCoordinator.play(uri: uri)
+  }
+
   private func searchSpotifyTracks(query: String, limit: Int) async throws -> [[String: Any?]] {
     guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return []
@@ -518,6 +554,46 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     }
     let expiresIn = json["expires_in"] as? Double ?? 3600
     tokenExpiresAt = Date().addingTimeInterval(expiresIn)
+    appRemoteCoordinator.setAccessToken(accessToken)
+    configureAppRemote()
+  }
+
+  private func applyAppRemotePlayerState(_ payload: [String: Any?]) {
+    currentTrack = [
+      "id": payload["spotifyUri"] ?? payload["uri"] ?? "",
+      "spotifyUri": payload["spotifyUri"] ?? "",
+      "uri": payload["uri"] ?? "",
+      "provider": "spotify",
+      "title": payload["title"] ?? "Unknown Track",
+      "artist": payload["artist"] ?? "Unknown Artist",
+      "album": payload["album"] ?? "",
+      "artworkUrl": currentTrack?["artworkUrl"] ?? "",
+      "durationMs": payload["durationMs"] ?? 0
+    ]
+    positionMs = payload["positionMs"] as? Int ?? positionMs
+    isPlaying = payload["isPlaying"] as? Bool ?? isPlaying
+    playbackStatus = isPlaying ? "playing" : "paused"
+    lastError = nil
+    emitState()
+  }
+
+  private func applyAppRemoteStatus(_ status: String, error: String?) {
+    if status == "appRemotePlaying" {
+      isPlaying = true
+      playbackStatus = "playing"
+    } else if status == "appRemoteDisconnected" {
+      playbackStatus = isPlaying ? "playing" : "paused"
+    } else {
+      playbackStatus = status
+    }
+
+    if let error, !error.isEmpty {
+      lastError = error
+    } else if !status.lowercased().contains("error") && status != "appRemoteConnectionFailed" {
+      lastError = nil
+    }
+
+    emitState()
   }
 
   private func serializeSpotifyTrack(_ item: [String: Any]) -> [String: Any?] {

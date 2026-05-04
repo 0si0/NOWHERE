@@ -198,7 +198,7 @@ export function LocationProvider({ children }) {
   }, [location]);
 
   const refreshAutoPlayPlaces = useCallback(async ({ force = false } = {}) => {
-    if (isFirebaseConfigured && (isSessionLoading || !authUser?.uid)) {
+    if (isFirebaseConfigured && isSessionLoading) {
       const cachedPlaces = await readCachedAutoPlayPlaces();
       autoPlayPlacesRef.current = { places: cachedPlaces, fetchedAt: Date.now() };
       return cachedPlaces;
@@ -210,7 +210,9 @@ export function LocationProvider({ children }) {
     }
 
     try {
-      const ownerId = authUser?.uid || await getOrCreateAppUserId();
+      const ownerId = authUser?.uid && !authUser.isAnonymous
+        ? authUser.uid
+        : await getOrCreateAppUserId();
       const places = await getSavedPlaces(ownerId);
       const activePlaces = await cacheAutoPlayPlaces(places);
       autoPlayPlacesRef.current = { places: activePlaces, fetchedAt: Date.now() };
@@ -220,7 +222,7 @@ export function LocationProvider({ children }) {
       autoPlayPlacesRef.current = { places: cachedPlaces, fetchedAt: Date.now() };
       return cachedPlaces;
     }
-  }, [authUser?.uid, isFirebaseConfigured, isSessionLoading]);
+  }, [authUser?.isAnonymous, authUser?.uid, isFirebaseConfigured, isSessionLoading]);
 
   const syncGeofenceRegions = useCallback(async (places) => {
     if (Platform.OS === 'web') {
@@ -242,7 +244,7 @@ export function LocationProvider({ children }) {
   }, [refreshAutoPlayPlaces, syncGeofenceRegions]);
 
   const executeAutoPlay = useCallback(async (place, source = 'foreground', coords = null) => {
-    if (!autoPlayModeEnabled || !place || autoPlayInFlightRef.current) {
+    if (!autoPlayModeEnabled || !hasBackgroundPermission || !place || autoPlayInFlightRef.current) {
       return null;
     }
 
@@ -263,7 +265,7 @@ export function LocationProvider({ children }) {
       await markAutoPlayTriggered(place.id);
       setAutoPlayStatus({ status: 'playing', place, error: null });
 
-      if (isFirebaseConfigured && authUser?.uid) {
+      if (isFirebaseConfigured && authUser?.uid && !authUser.isAnonymous) {
         savePlayRecord({
           userId: authUser.uid,
           trackId: target.id || target.spotifyUri,
@@ -285,10 +287,10 @@ export function LocationProvider({ children }) {
     } finally {
       autoPlayInFlightRef.current = false;
     }
-  }, [authUser?.uid, autoPlayModeEnabled, isFirebaseConfigured]);
+  }, [authUser?.isAnonymous, authUser?.uid, autoPlayModeEnabled, hasBackgroundPermission, isFirebaseConfigured]);
 
   const evaluateAutoPlay = useCallback(async (coords, source = 'foreground') => {
-    if (!autoPlayModeEnabled) {
+    if (!autoPlayModeEnabled || !hasBackgroundPermission) {
       return;
     }
 
@@ -297,7 +299,7 @@ export function LocationProvider({ children }) {
     if (candidate) {
       await executeAutoPlay(candidate, source, coords);
     }
-  }, [autoPlayModeEnabled, executeAutoPlay, refreshAutoPlayPlaces]);
+  }, [autoPlayModeEnabled, executeAutoPlay, hasBackgroundPermission, refreshAutoPlayPlaces]);
 
   const refreshPermissions = useCallback(async () => {
     const foreground = await Location.getForegroundPermissionsAsync();
@@ -464,17 +466,29 @@ export function LocationProvider({ children }) {
   }, [refreshAutoPlayPlaces, refreshPermissions, requestPermissions, syncGeofenceRegions]);
 
   const setAutoPlayModeEnabled = useCallback(async (enabled) => {
-    const nextEnabled = await writeAutoPlayModeEnabled(enabled);
+    if (!enabled) {
+      await writeAutoPlayModeEnabled(false);
+      setAutoPlayModeEnabledState(false);
+      return false;
+    }
+
+    const trackingStarted = await startBackgroundTracking().catch((error) => {
+      setLocationError(serializeError(error));
+      return false;
+    });
+
+    const permissions = await refreshPermissions();
+    const nextEnabled = Boolean(trackingStarted && permissions.hasBackgroundPermission);
+    await writeAutoPlayModeEnabled(nextEnabled);
     setAutoPlayModeEnabledState(nextEnabled);
 
-    if (nextEnabled) {
-      await startBackgroundTracking().catch((error) => {
-        setLocationError(serializeError(error));
-      });
+    if (!nextEnabled) {
+      await AsyncStorage.setItem(BACKGROUND_TRACKING_KEY, 'false');
+      setBackgroundTrackingEnabled(false);
     }
 
     return nextEnabled;
-  }, [startBackgroundTracking]);
+  }, [refreshPermissions, startBackgroundTracking]);
 
   const prepareAutoPlayMode = useCallback(async () => {
     const places = await refreshAutoPlayPlaces({ force: true }).catch(() => readCachedAutoPlayPlaces());
@@ -528,12 +542,20 @@ export function LocationProvider({ children }) {
       }
 
       const permissions = await refreshPermissions();
-      const isTrackingPreferred = savedTrackingPreference === 'true';
-      setAutoPlayModeEnabledState(savedAutoPlayMode);
+      const hasAlwaysPermission = permissions.hasBackgroundPermission;
+      const isTrackingPreferred = savedTrackingPreference === 'true' && hasAlwaysPermission;
+      const shouldShowAutoPlayOn = savedAutoPlayMode && hasAlwaysPermission;
+      setAutoPlayModeEnabledState(shouldShowAutoPlayOn);
+      if (savedAutoPlayMode && !hasAlwaysPermission) {
+        await writeAutoPlayModeEnabled(false);
+      }
+      if (savedTrackingPreference === 'true' && !hasAlwaysPermission) {
+        await AsyncStorage.setItem(BACKGROUND_TRACKING_KEY, 'false');
+      }
 
       if (Platform.OS !== 'web') {
         const isRegistered = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
-        setBackgroundTrackingEnabled(isTrackingPreferred || isRegistered);
+        setBackgroundTrackingEnabled((isTrackingPreferred || isRegistered) && hasAlwaysPermission);
 
         if (isTrackingPreferred && permissions.hasBackgroundPermission && !isRegistered) {
           await startBackgroundTracking();
@@ -579,6 +601,14 @@ export function LocationProvider({ children }) {
         return;
       }
 
+      const permissions = await refreshPermissions();
+      if (!permissions.hasBackgroundPermission) {
+        await writeAutoPlayModeEnabled(false);
+        await AsyncStorage.setItem(BACKGROUND_TRACKING_KEY, 'false');
+        setAutoPlayModeEnabledState(false);
+        setBackgroundTrackingEnabled(false);
+      }
+
       const cached = await readLocationCache();
       if (cached?.coords && Date.now() - (cached.timestamp || 0) < BACKGROUND_LOCATION_MAX_AGE_MS) {
         setLocation(cached.coords);
@@ -592,7 +622,6 @@ export function LocationProvider({ children }) {
         await executeAutoPlay(pendingAutoPlay.place, pendingAutoPlay.source || 'app-active', cached?.coords || locationRef.current);
       }
 
-      await refreshPermissions();
     });
 
     return () => {

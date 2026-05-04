@@ -48,6 +48,7 @@ import { cacheAutoPlayPlaces } from './autoPlayService';
 const SESSION_ID_KEY = '@nowhere/session-id';
 const LOCAL_APP_USER_ID_KEY = '@nowhere/local-app-user-id';
 const LOCAL_SAVED_PLACES_KEY = '@nowhere/local-saved-places';
+const LOCAL_USER_PREFIX = 'local-user-';
 
 function getComparableTimestamp(value) {
   if (!value) return 0;
@@ -85,6 +86,45 @@ async function writeLocalSavedPlaces(places) {
   await AsyncStorage.setItem(LOCAL_SAVED_PLACES_KEY, JSON.stringify(places));
 }
 
+function isLocalAppUserId(userId) {
+  return typeof userId === 'string' && userId.startsWith(LOCAL_USER_PREFIX);
+}
+
+function shouldUseLocalSavedPlaces(auth, userId) {
+  return auth.currentUser?.isAnonymous || isLocalAppUserId(userId);
+}
+
+async function migrateAnonymousLocalPlaces(ownerId) {
+  if (!isLocalAppUserId(ownerId)) {
+    return readLocalSavedPlaces();
+  }
+
+  const savedPlaces = await readLocalSavedPlaces();
+  let didChange = false;
+  const nextPlaces = savedPlaces.map((item) => {
+    if (
+      item.userId !== ownerId &&
+      item.status !== 'archived' &&
+      (item.syncStatus === 'localOnly' || item.remoteError === 'permission-denied')
+    ) {
+      didChange = true;
+      return {
+        ...item,
+        userId: ownerId,
+        updatedAt: item.updatedAt || new Date().toISOString(),
+      };
+    }
+
+    return item;
+  });
+
+  if (didChange) {
+    await writeLocalSavedPlaces(nextPlaces);
+  }
+
+  return nextPlaces;
+}
+
 function buildLocalSavedPlaceId() {
   return `local-place-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -98,7 +138,7 @@ function isPermissionDeniedError(error) {
 }
 
 async function saveLocalSavedPlaceDocument(sanitized, overrides = {}) {
-  const savedPlaces = await readLocalSavedPlaces();
+  const savedPlaces = await migrateAnonymousLocalPlaces(sanitized.userId);
   const activeCount = savedPlaces.filter((item) => item.userId === sanitized.userId && item.status !== 'archived').length;
   if (activeCount >= MAX_AUTOPLAY_PLACES) {
     throw new Error(`자동재생 장소는 한 사람당 최대 ${MAX_AUTOPLAY_PLACES}개까지 저장할 수 있습니다.`);
@@ -113,8 +153,9 @@ async function saveLocalSavedPlaceDocument(sanitized, overrides = {}) {
     ...overrides,
   };
 
-  await writeLocalSavedPlaces([...savedPlaces, nextPlace]);
-  await cacheAutoPlayPlaces([...savedPlaces, nextPlace]);
+  const nextPlaces = [...savedPlaces, nextPlace];
+  await writeLocalSavedPlaces(nextPlaces);
+  await cacheAutoPlayPlaces(nextPlaces.filter((item) => item.userId === sanitized.userId));
   return nextPlace;
 }
 
@@ -148,6 +189,18 @@ function assertAuthenticatedUser(auth, requestedUserId) {
   return currentUserId;
 }
 
+async function buildLocalAnonymousProfile(user = null) {
+  const localUserId = await getOrCreateAppUserId();
+  return {
+    id: localUserId,
+    uid: localUserId,
+    firebaseUid: user?.uid || null,
+    displayName: '익명 회원',
+    isAnonymous: true,
+    storageMode: 'local',
+  };
+}
+
 export async function bootstrapUserProfile(user) {
   const { db } = assertFirebaseConfigured();
   const profileRef = getUserDocumentRef(db, user.uid);
@@ -175,11 +228,15 @@ export async function ensureAnonymousSession() {
   const { auth } = assertFirebaseConfigured();
 
   if (auth.currentUser) {
+    if (auth.currentUser.isAnonymous) {
+      return buildLocalAnonymousProfile(auth.currentUser);
+    }
+
     return bootstrapUserProfile(auth.currentUser);
   }
 
   const credential = await signInAnonymously(auth);
-  return bootstrapUserProfile(credential.user);
+  return buildLocalAnonymousProfile(credential.user);
 }
 
 export function subscribeToAuthSession(onChange) {
@@ -189,6 +246,12 @@ export function subscribeToAuthSession(onChange) {
     try {
       if (!user) {
         await signInAnonymously(auth);
+        return;
+      }
+
+      if (user.isAnonymous) {
+        const profile = await buildLocalAnonymousProfile(user);
+        onChange({ user, profile, error: null });
         return;
       }
 
@@ -215,7 +278,7 @@ export async function getOrCreateSessionId() {
 export async function getOrCreateAppUserId() {
   if (isFirebaseConfiguredInClient()) {
     const { auth } = assertFirebaseConfigured();
-    if (auth.currentUser?.uid) {
+    if (auth.currentUser?.uid && !auth.currentUser.isAnonymous) {
       return auth.currentUser.uid;
     }
   }
@@ -242,6 +305,10 @@ export async function saveSavedPlace(input) {
   }
 
   const { auth, db } = assertFirebaseConfigured();
+  if (shouldUseLocalSavedPlaces(auth, sanitized.userId)) {
+    return saveLocalSavedPlaceDocument(sanitized);
+  }
+
   const userId = assertAuthenticatedUser(auth, sanitized.userId);
   const existingPlaces = await getSavedPlaces(userId);
   const activeCount = existingPlaces.filter((item) => item.status !== 'archived').length;
@@ -274,7 +341,7 @@ export async function getSavedPlaces(userId) {
   const ownerId = userId || await getOrCreateAppUserId();
 
   if (!isFirebaseConfiguredInClient()) {
-    const savedPlaces = await readLocalSavedPlaces();
+    const savedPlaces = await migrateAnonymousLocalPlaces(ownerId);
     const sortedPlaces = sortByUpdatedAtDescending(
       savedPlaces.filter((item) => item.userId === ownerId)
     );
@@ -284,6 +351,15 @@ export async function getSavedPlaces(userId) {
 
   try {
     const { auth, db } = assertFirebaseConfigured();
+    if (shouldUseLocalSavedPlaces(auth, ownerId)) {
+      const savedPlaces = await migrateAnonymousLocalPlaces(ownerId);
+      const sortedPlaces = sortByUpdatedAtDescending(
+        savedPlaces.filter((item) => item.userId === ownerId)
+      );
+      await cacheAutoPlayPlaces(sortedPlaces);
+      return sortedPlaces;
+    }
+
     const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
     const placesQuery = query(
       getSavedPlacesCollection(db, validatedOwnerId),
@@ -322,8 +398,11 @@ export async function updateSavedPlace(placeId, input) {
     userId: resolvedUserId,
   });
 
-  if (!isFirebaseConfiguredInClient()) {
-    const savedPlaces = await readLocalSavedPlaces();
+  const shouldUseLocal = !isFirebaseConfiguredInClient() ||
+    shouldUseLocalSavedPlaces(assertFirebaseConfigured().auth, sanitized.userId);
+
+  if (shouldUseLocal) {
+    const savedPlaces = await migrateAnonymousLocalPlaces(sanitized.userId);
     const nextPlaces = savedPlaces.map((item) => {
       if (item.id !== placeId || item.userId !== sanitized.userId) {
         return item;
@@ -383,8 +462,11 @@ export async function updateSavedPlace(placeId, input) {
 export async function archiveSavedPlace(userId, placeId) {
   const ownerId = userId || await getOrCreateAppUserId();
 
-  if (!isFirebaseConfiguredInClient()) {
-    const savedPlaces = await readLocalSavedPlaces();
+  const shouldUseLocal = !isFirebaseConfiguredInClient() ||
+    shouldUseLocalSavedPlaces(assertFirebaseConfigured().auth, ownerId);
+
+  if (shouldUseLocal) {
+    const savedPlaces = await migrateAnonymousLocalPlaces(ownerId);
     const nextPlaces = savedPlaces.map((item) => {
       if (item.id !== placeId || item.userId !== ownerId) {
         return item;

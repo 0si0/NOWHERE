@@ -18,7 +18,6 @@ import { API_KEYS, COLORS, MAX_AUTOPLAY_PLACES, RADIUS_OPTIONS } from '../consta
 import { LocationContext } from '../contexts/LocationContext';
 import { useSession } from '../contexts/SessionContext';
 import {
-  ensureAnonymousSession,
   getOrCreateAppUserId,
   getSavedPlaces,
   saveSavedPlace,
@@ -165,7 +164,7 @@ export default function PlaceSetupScreen({ navigation }) {
   );
 
   const resolveOwnerId = useCallback(async () => {
-    if (!isFirebaseConfigured) {
+    if (!isFirebaseConfigured || authUser?.isAnonymous) {
       return getOrCreateAppUserId();
     }
 
@@ -173,13 +172,8 @@ export default function PlaceSetupScreen({ navigation }) {
       return authUser.uid;
     }
 
-    const profile = await ensureAnonymousSession();
-    const ownerId = profile.uid || profile.id;
-    if (!ownerId) {
-      throw new Error('Firebase 익명 사용자 ID를 가져오지 못했습니다.');
-    }
-    return ownerId;
-  }, [authUser?.uid, isFirebaseConfigured]);
+    return getOrCreateAppUserId();
+  }, [authUser?.isAnonymous, authUser?.uid, isFirebaseConfigured]);
 
   useEffect(() => {
     if (!location || editingPlaceId) {

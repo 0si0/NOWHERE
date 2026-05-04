@@ -131,6 +131,7 @@ export default function HomeScreen({ navigation }) {
   const {
     weather,
     hasForegroundPermission,
+    hasBackgroundPermission,
     isLocating,
     locationError,
     autoPlayModeEnabled,
@@ -148,6 +149,7 @@ export default function HomeScreen({ navigation }) {
   const wheelSize = Math.min(width * (isCompact ? 0.48 : 0.53), isCompact ? 194 : 224);
   const albumInset = Math.max(7, wheelSize * 0.035);
   const sideInset = Math.max(22, width * 0.055);
+  const isAutoPlayVisibleOn = autoPlayModeEnabled && hasBackgroundPermission;
   const contextTop = isCompact ? 104 : 118;
   const heroTop = contextTop + (isCompact ? 56 : 70);
   const dotsTop = heroTop + wheelSize + (isCompact ? 17 : 22);
@@ -262,7 +264,7 @@ export default function HomeScreen({ navigation }) {
   };
 
   const handleToggleAutoPlayMode = () => {
-    if (autoPlayModeEnabled) {
+    if (isAutoPlayVisibleOn) {
       setAutoPlayModeEnabled(false).catch((error) => {
         Alert.alert('자동재생 설정 실패', error.message || '자동재생 모드를 끄지 못했습니다.');
       });
@@ -295,12 +297,12 @@ export default function HomeScreen({ navigation }) {
         <View style={[styles.topBar, { paddingHorizontal: sideInset }]}>
           <Text style={styles.logo}>NOWHERE</Text>
           <TouchableOpacity
-            style={[styles.autoPlayToggle, autoPlayModeEnabled && styles.autoPlayToggleActive]}
+            style={[styles.autoPlayToggle, isAutoPlayVisibleOn && styles.autoPlayToggleActive]}
             activeOpacity={0.82}
             onPress={handleToggleAutoPlayMode}
           >
-            <Text style={[styles.autoPlayToggleText, autoPlayModeEnabled && styles.autoPlayToggleTextActive]}>
-              {autoPlayModeEnabled ? 'AUTO ON' : 'AUTO OFF'}
+            <Text style={[styles.autoPlayToggleText, isAutoPlayVisibleOn && styles.autoPlayToggleTextActive]}>
+              {isAutoPlayVisibleOn ? 'AUTO ON' : 'AUTO OFF'}
             </Text>
           </TouchableOpacity>
         </View>

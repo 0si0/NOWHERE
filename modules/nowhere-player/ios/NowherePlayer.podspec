@@ -14,6 +14,7 @@ Pod::Spec.new do |s|
   s.swift_version  = '5.9'
   s.source         = { :git => 'https://example.invalid/nowhere-player.git' }
   s.static_framework = true
-  s.source_files   = '**/*.{h,m,swift}'
+  s.source_files   = '*.swift'
+  s.vendored_frameworks = 'Frameworks/SpotifyiOS.xcframework'
   s.dependency 'ExpoModulesCore'
 end

@@ -39,6 +39,7 @@ import { MAX_AUTOPLAY_PLACES } from '../constants';
 import {
   buildUserProfileDocument,
   sanitizeConsentInput,
+  sanitizeListeningEventInput,
   sanitizePlayRecordInput,
   sanitizeSavedPlaceInput,
   sanitizeVibePayload,
@@ -48,7 +49,9 @@ import { cacheAutoPlayPlaces } from './autoPlayService';
 const SESSION_ID_KEY = '@nowhere/session-id';
 const LOCAL_APP_USER_ID_KEY = '@nowhere/local-app-user-id';
 const LOCAL_SAVED_PLACES_KEY = '@nowhere/local-saved-places';
+const LOCAL_LISTENING_EVENTS_KEY = '@nowhere/local-listening-events';
 const LOCAL_USER_PREFIX = 'local-user-';
+const MAX_LOCAL_LISTENING_EVENTS = 500;
 
 function getComparableTimestamp(value) {
   if (!value) return 0;
@@ -84,6 +87,25 @@ async function readLocalSavedPlaces() {
 
 async function writeLocalSavedPlaces(places) {
   await AsyncStorage.setItem(LOCAL_SAVED_PLACES_KEY, JSON.stringify(places));
+}
+
+async function readLocalListeningEvents() {
+  const raw = await AsyncStorage.getItem(LOCAL_LISTENING_EVENTS_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    await AsyncStorage.removeItem(LOCAL_LISTENING_EVENTS_KEY);
+    return [];
+  }
+}
+
+async function writeLocalListeningEvents(events) {
+  await AsyncStorage.setItem(LOCAL_LISTENING_EVENTS_KEY, JSON.stringify(events.slice(0, MAX_LOCAL_LISTENING_EVENTS)));
 }
 
 function isLocalAppUserId(userId) {
@@ -169,6 +191,10 @@ function getSavedPlacesCollection(db, userId) {
 
 function getPlayHistoryCollection(db, userId) {
   return collection(db, 'users', userId, 'playHistory');
+}
+
+function getListeningEventsCollection(db, userId) {
+  return collection(db, 'users', userId, 'listeningEvents');
 }
 
 function getConsentCollection(db, userId) {
@@ -530,6 +556,68 @@ export async function savePlayRecord(input) {
   });
 
   return { id: docRef.id, ...sanitized };
+}
+
+export async function saveListeningEvent(input) {
+  const resolvedUserId = input.userId || await getOrCreateAppUserId();
+  const sanitized = sanitizeListeningEventInput({
+    ...input,
+    userId: resolvedUserId,
+  });
+  const localPayload = {
+    id: `event-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    ...sanitized,
+    createdAt: new Date().toISOString(),
+  };
+
+  if (!isFirebaseConfiguredInClient()) {
+    const events = await readLocalListeningEvents();
+    await writeLocalListeningEvents([localPayload, ...events]);
+    return localPayload;
+  }
+
+  const { auth, db } = assertFirebaseConfigured();
+  if (shouldUseLocalSavedPlaces(auth, sanitized.userId)) {
+    const events = await readLocalListeningEvents();
+    await writeLocalListeningEvents([localPayload, ...events]);
+    return localPayload;
+  }
+
+  const userId = assertAuthenticatedUser(auth, sanitized.userId);
+  const docRef = await addDoc(getListeningEventsCollection(db, userId), {
+    ...sanitized,
+    createdAt: serverTimestamp(),
+  });
+
+  return { id: docRef.id, ...sanitized };
+}
+
+export async function getListeningEvents(userId, maxRecords = 200) {
+  const ownerId = userId || await getOrCreateAppUserId();
+
+  if (!isFirebaseConfiguredInClient()) {
+    const events = await readLocalListeningEvents();
+    return events.filter((event) => event.userId === ownerId).slice(0, maxRecords);
+  }
+
+  const { auth, db } = assertFirebaseConfigured();
+  if (shouldUseLocalSavedPlaces(auth, ownerId)) {
+    const events = await readLocalListeningEvents();
+    return events.filter((event) => event.userId === ownerId).slice(0, maxRecords);
+  }
+
+  const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
+  const eventsQuery = query(
+    getListeningEventsCollection(db, validatedOwnerId),
+    orderBy('occurredAt', 'desc'),
+    limit(maxRecords)
+  );
+  const snapshot = await getDocs(eventsQuery);
+
+  return snapshot.docs.map((item) => ({
+    id: item.id,
+    ...item.data(),
+  }));
 }
 
 export async function getRecentPlayHistory(userId, maxRecords = 25) {

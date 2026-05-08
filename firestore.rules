@@ -167,6 +167,84 @@ service cloud.firestore {
         isShortString(data.location.geohash, 12);
     }
 
+    function isChallengeMap(data) {
+      return data.keys().hasAll(['genre', 'country', 'mood', 'request']) &&
+        data.keys().hasOnly(['genre', 'country', 'mood', 'request']) &&
+        isShortString(data.genre, 40) &&
+        isShortString(data.country, 40) &&
+        isShortString(data.mood, 40) &&
+        isShortString(data.request, 30);
+    }
+
+    function isListeningContext(data) {
+      return data.keys().hasAll([
+        'timeBucket',
+        'hour',
+        'weatherCondition',
+        'weatherMood',
+        'placeName',
+        'savedPlaceId',
+        'geohash',
+        'location'
+      ]) &&
+        data.keys().hasOnly([
+        'timeBucket',
+        'hour',
+        'weatherCondition',
+        'weatherMood',
+        'placeName',
+        'savedPlaceId',
+        'geohash',
+        'location'
+      ]) &&
+        isShortString(data.timeBucket, 40) &&
+        data.hour is int &&
+        data.hour >= 0 &&
+        data.hour <= 23 &&
+        isShortString(data.weatherCondition, 40) &&
+        isShortString(data.weatherMood, 60) &&
+        isShortString(data.placeName, 80) &&
+        isShortString(data.savedPlaceId, 160) &&
+        isShortString(data.geohash, 12) &&
+        data.location.keys().hasAll(['latitude', 'longitude']) &&
+        data.location.keys().hasOnly(['latitude', 'longitude']) &&
+        (data.location.latitude == null || isNumber(data.location.latitude)) &&
+        (data.location.longitude == null || isNumber(data.location.longitude));
+    }
+
+    function isListeningEvent(data, userId) {
+      return data.keys().hasAll([
+        'userId',
+        'eventType',
+        'source',
+        'recommendationSlot',
+        'track',
+        'context',
+        'challenge',
+        'occurredAt',
+        'createdAt'
+      ]) &&
+        data.keys().hasOnly([
+        'userId',
+        'eventType',
+        'source',
+        'recommendationSlot',
+        'track',
+        'context',
+        'challenge',
+        'occurredAt',
+        'createdAt'
+      ]) &&
+        data.userId == userId &&
+        isShortString(data.eventType, 40) &&
+        isShortString(data.source, 40) &&
+        isShortString(data.recommendationSlot, 40) &&
+        isPlayTargetMap(data.track) &&
+        isListeningContext(data.context) &&
+        isChallengeMap(data.challenge) &&
+        isShortString(data.occurredAt, 64);
+    }
+
     function isConsent(data, userId, consentId) {
       return data.keys().hasAll([
         'userId',
@@ -221,6 +299,12 @@ service cloud.firestore {
       match /playHistory/{recordId} {
         allow read: if isOwner(userId);
         allow create: if isOwner(userId) && isPlayRecord(request.resource.data, userId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /listeningEvents/{eventId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isListeningEvent(request.resource.data, userId);
         allow delete: if isOwner(userId);
       }
 

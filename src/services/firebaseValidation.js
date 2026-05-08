@@ -204,6 +204,50 @@ export function sanitizePlayRecordInput(input) {
   };
 }
 
+export function sanitizeListeningEventInput(input) {
+  const hasCoordinates = isNumeric(input.latitude) && isNumeric(input.longitude);
+  const latitude = hasCoordinates ? cleanLatitude(input.latitude) : null;
+  const longitude = hasCoordinates ? cleanLongitude(input.longitude) : null;
+  const geohash = hasCoordinates
+    ? encodeGeohash(latitude, longitude)
+    : cleanOptionalText(input.geohash, '지오해시', 12);
+  const track = cleanPlayTarget(input.track || input.playTarget || input);
+  invariant(track, '청취 이벤트에는 곡 정보가 필요합니다.');
+
+  const occurredAt = typeof input.occurredAt === 'string' && input.occurredAt
+    ? input.occurredAt
+    : new Date().toISOString();
+
+  return {
+    userId: cleanText(input.userId, '사용자 ID', { max: 128 }),
+    schemaVersion: Number.isInteger(input.schemaVersion) ? input.schemaVersion : 1,
+    eventType: cleanOptionalText(input.eventType, '이벤트 종류', 40) || 'play',
+    source: cleanOptionalText(input.source, '청취 소스', 40) || 'unknown',
+    recommendationSlot: cleanOptionalText(input.recommendationSlot, '추천 슬롯', 40),
+    track,
+    context: {
+      timeBucket: cleanOptionalText(input.timeBucket, '시간대', 40),
+      hour: Number.isInteger(input.hour) && input.hour >= 0 && input.hour <= 23 ? input.hour : new Date(occurredAt).getHours(),
+      weatherCondition: cleanOptionalText(input.weatherCondition, '날씨 조건', 40),
+      weatherMood: cleanOptionalText(input.weatherMood, '날씨 분위기', 60),
+      placeName: cleanOptionalText(input.placeName, '장소 이름', 80),
+      savedPlaceId: cleanOptionalText(input.savedPlaceId, '저장 장소 ID', 160),
+      geohash,
+      location: {
+        latitude,
+        longitude,
+      },
+    },
+    challenge: {
+      genre: cleanOptionalText(input.challenge?.genre, 'Challenge 장르', 40),
+      country: cleanOptionalText(input.challenge?.country, 'Challenge 나라', 40),
+      mood: cleanOptionalText(input.challenge?.mood, 'Challenge 분위기', 40),
+      request: cleanOptionalText(input.challenge?.request, 'Challenge 추가 요청', 30),
+    },
+    occurredAt,
+  };
+}
+
 export function sanitizeConsentInput(input) {
   invariant(typeof input.granted === 'boolean', '동의 여부 형식이 올바르지 않습니다.');
 

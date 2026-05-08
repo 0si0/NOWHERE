@@ -13,8 +13,9 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import KakaoPlacePicker from '../components/KakaoPlacePicker';
-import { API_KEYS, COLORS, MAX_AUTOPLAY_PLACES, RADIUS_OPTIONS } from '../constants';
+import { API_KEYS, MAX_AUTOPLAY_PLACES, RADIUS_OPTIONS } from '../constants';
 import { LocationContext } from '../contexts/LocationContext';
 import { useSession } from '../contexts/SessionContext';
 import {
@@ -29,6 +30,21 @@ const EMPTY_ARTWORK = require('../../assets/EmptyMark.png');
 const DEFAULT_MAP_CENTER = {
   latitude: 37.5665,
   longitude: 126.978,
+};
+
+const UI = {
+  bg: '#05070A',
+  surface: 'rgba(22, 22, 22, 0.74)',
+  surfaceStrong: 'rgba(37, 32, 30, 0.82)',
+  surfaceSoft: 'rgba(255, 201, 184, 0.08)',
+  border: 'rgba(255, 201, 184, 0.22)',
+  borderStrong: 'rgba(255, 201, 184, 0.58)',
+  text: '#FFF1EC',
+  textSoft: '#D8C5BE',
+  textMuted: '#948985',
+  peach: '#FFC8B8',
+  peachStrong: '#FFB09E',
+  amber: '#F7A94D',
 };
 
 function formatTimestamp(value) {
@@ -228,10 +244,6 @@ export default function PlaceSetupScreen({ navigation }) {
 
     try {
       setIsSearchingTracks(true);
-      const authorization = await musicPlayerService.requestAuthorization();
-      if (authorization?.status === 'missingClientId') {
-        throw new Error('Spotify Client ID가 설정되지 않았습니다.');
-      }
       const results = await musicPlayerService.search(query, 10);
       setTrackResults(results.map(normalizePlayTargetForForm).filter(Boolean));
       if (results.length === 0) {
@@ -247,10 +259,6 @@ export default function PlaceSetupScreen({ navigation }) {
   const handleLoadPlaylists = async () => {
     try {
       setIsLoadingPlaylists(true);
-      const authorization = await musicPlayerService.requestAuthorization();
-      if (authorization?.status === 'missingClientId') {
-        throw new Error('Spotify Client ID가 설정되지 않았습니다.');
-      }
       const playlists = await musicPlayerService.getUserPlaylists(30);
       const normalizedPlaylists = playlists.map(normalizePlayTargetForForm).filter(Boolean);
       setTargetMode('playlist');
@@ -461,7 +469,7 @@ export default function PlaceSetupScreen({ navigation }) {
             value={placeName}
             onChangeText={setPlaceName}
             placeholder="예: 성수동 카페, 학교 정문, 퇴근 버스정류장"
-            placeholderTextColor={COLORS.textMuted}
+            placeholderTextColor={UI.textMuted}
             style={styles.input}
           />
           <View style={styles.radiusRow}>
@@ -489,6 +497,11 @@ export default function PlaceSetupScreen({ navigation }) {
                 setTrackResults([]);
               }}
             >
+              <Ionicons
+                name="musical-notes-outline"
+                size={16}
+                color={targetMode === 'track' ? UI.text : UI.textMuted}
+              />
               <Text style={[styles.modeButtonText, targetMode === 'track' && styles.modeButtonTextActive]}>곡 검색</Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -496,6 +509,11 @@ export default function PlaceSetupScreen({ navigation }) {
               onPress={handleLoadPlaylists}
               disabled={isLoadingPlaylists}
             >
+              <Ionicons
+                name="list-outline"
+                size={18}
+                color={targetMode === 'playlist' ? UI.text : UI.textMuted}
+              />
               <Text style={[styles.modeButtonText, targetMode === 'playlist' && styles.modeButtonTextActive]}>
                 {isLoadingPlaylists ? '불러오는 중' : '내 플레이리스트'}
               </Text>
@@ -507,7 +525,7 @@ export default function PlaceSetupScreen({ navigation }) {
                 value={trackQuery}
                 onChangeText={setTrackQuery}
                 placeholder="곡 제목 또는 아티스트 검색"
-                placeholderTextColor={COLORS.textMuted}
+                placeholderTextColor={UI.textMuted}
                 style={styles.searchInput}
                 autoCapitalize="none"
                 returnKeyType="search"
@@ -581,7 +599,7 @@ export default function PlaceSetupScreen({ navigation }) {
           </Text>
           {isLoadingSavedPlaces ? (
             <View style={styles.loadingState}>
-              <ActivityIndicator color={COLORS.green} />
+              <ActivityIndicator color={UI.peach} />
               <Text style={styles.loadingText}>저장된 장소를 불러오는 중...</Text>
             </View>
           ) : activePlaces.length === 0 ? (
@@ -607,230 +625,257 @@ export default function PlaceSetupScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: COLORS.bg },
+  container: { flex: 1, backgroundColor: UI.bg },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingHorizontal: 22,
+    paddingTop: 12,
+    paddingBottom: 18,
     borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    borderBottomColor: 'rgba(255, 255, 255, 0.10)',
   },
-  backBtn: { padding: 4 },
-  backText: { color: COLORS.text, fontSize: 22 },
-  title: { color: COLORS.text, fontSize: 18, fontWeight: '700' },
+  backBtn: { width: 40, height: 40, justifyContent: 'center' },
+  backText: { color: UI.peach, fontSize: 30, fontWeight: '300' },
+  title: { color: UI.text, fontSize: 19, fontWeight: '800' },
   keyboardAvoider: { flex: 1 },
-  scroll: { paddingHorizontal: 20, paddingTop: 18, paddingBottom: 180 },
-  section: { marginBottom: 22 },
+  scroll: { paddingHorizontal: 20, paddingTop: 24, paddingBottom: 180 },
+  section: { marginBottom: 26 },
   sectionHeader: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     justifyContent: 'space-between',
-    marginBottom: 10,
+    marginBottom: 12,
     gap: 12,
   },
-  sectionTitle: { color: COLORS.text, fontSize: 16, fontWeight: '800', marginBottom: 10 },
+  sectionTitle: { color: UI.peach, fontSize: 19, fontWeight: '900', marginBottom: 14 },
   input: {
-    padding: 14,
-    borderRadius: 12,
-    backgroundColor: COLORS.surface,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+    borderRadius: 18,
+    backgroundColor: UI.surface,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    color: COLORS.text,
+    borderColor: UI.border,
+    color: UI.text,
     fontSize: 15,
-    marginBottom: 12,
+    marginBottom: 14,
   },
   permissionRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 12 },
   permissionButton: {
     borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    backgroundColor: COLORS.green,
+    paddingHorizontal: 16,
+    paddingVertical: 11,
+    backgroundColor: UI.peach,
   },
-  permissionButtonText: { color: '#000', fontSize: 13, fontWeight: '800' },
+  permissionButtonText: { color: '#211817', fontSize: 13, fontWeight: '900' },
   permissionGhostButton: {
     borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    backgroundColor: COLORS.surface,
+    paddingHorizontal: 16,
+    paddingVertical: 11,
+    backgroundColor: UI.surface,
     borderWidth: 1,
-    borderColor: COLORS.green,
+    borderColor: UI.borderStrong,
   },
-  permissionGhostButtonText: { color: COLORS.green, fontSize: 13, fontWeight: '800' },
-  errorText: { color: COLORS.coral, fontSize: 12, marginTop: 10, lineHeight: 18 },
+  permissionGhostButtonText: { color: UI.peach, fontSize: 13, fontWeight: '900' },
+  errorText: { color: '#FF7777', fontSize: 12, marginTop: 10, lineHeight: 18 },
   localModeBanner: {
-    padding: 14,
-    borderRadius: 14,
-    backgroundColor: COLORS.amberSurface,
+    padding: 15,
+    borderRadius: 18,
+    backgroundColor: 'rgba(247, 169, 77, 0.12)',
     borderWidth: 1,
-    borderColor: COLORS.amber + '55',
-    marginBottom: 18,
+    borderColor: 'rgba(247, 169, 77, 0.45)',
+    marginBottom: 22,
   },
-  localModeTitle: { color: COLORS.amber, fontSize: 14, fontWeight: '700' },
-  localModeText: { color: COLORS.textSub, fontSize: 12, lineHeight: 18, marginTop: 6 },
-  localModeHint: { color: COLORS.textMuted, fontSize: 11, lineHeight: 16, marginTop: 8 },
-  radiusRow: { flexDirection: 'row', gap: 8 },
+  localModeTitle: { color: UI.amber, fontSize: 14, fontWeight: '800' },
+  localModeText: { color: UI.textSoft, fontSize: 12, lineHeight: 18, marginTop: 7 },
+  localModeHint: { color: UI.textMuted, fontSize: 11, lineHeight: 16, marginTop: 8 },
+  radiusRow: { flexDirection: 'row', gap: 10 },
   radiusBtn: {
     flex: 1,
-    paddingVertical: 12,
-    borderRadius: 10,
-    backgroundColor: COLORS.surface,
+    minHeight: 56,
+    borderRadius: 16,
+    backgroundColor: UI.surface,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: UI.border,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  radiusBtnActive: { backgroundColor: COLORS.green, borderColor: COLORS.green },
-  radiusBtnText: { color: COLORS.textSub, fontSize: 14, fontWeight: '600' },
-  radiusBtnTextActive: { color: '#000' },
+  radiusBtnActive: {
+    backgroundColor: 'rgba(255, 201, 184, 0.28)',
+    borderColor: UI.borderStrong,
+    shadowColor: UI.peachStrong,
+    shadowOpacity: 0.34,
+    shadowRadius: 13,
+    shadowOffset: { width: 0, height: 4 },
+  },
+  radiusBtnText: { color: UI.textMuted, fontSize: 15, fontWeight: '800' },
+  radiusBtnTextActive: { color: UI.text },
   modeRow: {
     flexDirection: 'row',
-    gap: 10,
-    marginBottom: 12,
+    gap: 0,
+    marginBottom: 13,
+    padding: 4,
+    borderRadius: 18,
+    backgroundColor: UI.surface,
+    borderWidth: 1,
+    borderColor: UI.border,
   },
   modeButton: {
     flex: 1,
-    paddingVertical: 12,
-    borderRadius: 12,
-    backgroundColor: COLORS.surface,
-    borderWidth: 1,
-    borderColor: COLORS.border,
+    minHeight: 48,
+    borderRadius: 14,
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
   },
   modeButtonActive: {
-    backgroundColor: COLORS.green,
-    borderColor: COLORS.green,
+    backgroundColor: 'rgba(255, 201, 184, 0.34)',
+    borderWidth: 1,
+    borderColor: UI.borderStrong,
   },
-  modeButtonText: { color: COLORS.textSub, fontSize: 13, fontWeight: '800' },
-  modeButtonTextActive: { color: '#000' },
+  modeButtonText: { color: UI.textMuted, fontSize: 13, fontWeight: '900' },
+  modeButtonTextActive: { color: UI.text },
   searchRow: { flexDirection: 'row', gap: 10 },
   searchInput: {
     flex: 1,
-    padding: 14,
-    borderRadius: 12,
-    backgroundColor: COLORS.surface,
+    paddingHorizontal: 16,
+    paddingVertical: 15,
+    borderRadius: 16,
+    backgroundColor: UI.surface,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    color: COLORS.text,
-    fontSize: 15,
+    borderColor: UI.border,
+    color: UI.text,
+    fontSize: 14,
   },
   searchButton: {
-    paddingHorizontal: 18,
-    borderRadius: 12,
-    backgroundColor: COLORS.green,
+    minWidth: 74,
+    borderRadius: 16,
+    backgroundColor: UI.surfaceStrong,
+    borderWidth: 1,
+    borderColor: UI.borderStrong,
     alignItems: 'center',
     justifyContent: 'center',
   },
   searchButtonDisabled: { opacity: 0.6 },
-  searchButtonText: { color: '#000', fontSize: 14, fontWeight: '800' },
-  helperText: { color: COLORS.textMuted, fontSize: 12, marginTop: 12, lineHeight: 18 },
+  searchButtonText: { color: UI.peach, fontSize: 14, fontWeight: '900' },
+  helperText: { color: UI.textMuted, fontSize: 12, marginTop: 12, lineHeight: 18 },
   selectedTrackBox: {
-    marginTop: 12,
-    marginBottom: 6,
+    marginTop: 14,
+    marginBottom: 7,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    borderRadius: 14,
-    padding: 12,
-    backgroundColor: COLORS.greenSurface,
+    borderRadius: 18,
+    padding: 13,
+    backgroundColor: UI.surfaceSoft,
     borderWidth: 1,
-    borderColor: COLORS.green + '55',
+    borderColor: UI.borderStrong,
   },
-  selectedLabel: { color: COLORS.green, fontSize: 11, fontWeight: '800', marginBottom: 3 },
+  selectedLabel: { color: UI.peach, fontSize: 11, fontWeight: '900', marginBottom: 3 },
   trackCard: {
     marginTop: 10,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    borderRadius: 14,
-    padding: 12,
-    backgroundColor: COLORS.surface,
+    borderRadius: 18,
+    padding: 13,
+    backgroundColor: UI.surface,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: UI.border,
   },
-  trackCardSelected: { borderColor: COLORS.green, backgroundColor: COLORS.greenSurface },
+  trackCardSelected: { borderColor: UI.borderStrong, backgroundColor: UI.surfaceSoft },
   trackTextBox: { flex: 1, minWidth: 0 },
-  trackTitle: { color: COLORS.text, fontSize: 14, fontWeight: '800' },
-  trackArtist: { color: COLORS.textSub, fontSize: 12, marginTop: 4 },
+  trackTitle: { color: UI.text, fontSize: 14, fontWeight: '900' },
+  trackArtist: { color: UI.textSoft, fontSize: 12, marginTop: 4 },
   selectDot: {
     width: 14,
     height: 14,
     borderRadius: 7,
     borderWidth: 2,
-    borderColor: COLORS.textMuted,
+    borderColor: UI.textMuted,
   },
-  selectDotActive: { backgroundColor: COLORS.green, borderColor: COLORS.green },
+  selectDotActive: { backgroundColor: UI.peach, borderColor: UI.peach },
   formActions: { marginTop: 4 },
   saveBtn: {
-    paddingVertical: 16,
-    borderRadius: 14,
-    backgroundColor: COLORS.green,
+    paddingVertical: 18,
+    borderRadius: 999,
+    backgroundColor: UI.peach,
     alignItems: 'center',
+    shadowColor: UI.peachStrong,
+    shadowOpacity: 0.42,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 7 },
   },
   saveBtnDisabled: { opacity: 0.6 },
-  saveBtnText: { color: '#000', fontSize: 16, fontWeight: '800' },
+  saveBtnText: { color: '#241A18', fontSize: 17, fontWeight: '900' },
   cancelBtn: {
-    marginTop: 10,
-    borderRadius: 14,
+    marginTop: 12,
+    borderRadius: 999,
     borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: COLORS.surface,
+    borderColor: UI.border,
+    backgroundColor: UI.surface,
     paddingVertical: 14,
     alignItems: 'center',
   },
-  cancelBtnText: { color: COLORS.textSub, fontSize: 14, fontWeight: '700' },
+  cancelBtnText: { color: UI.textSoft, fontSize: 14, fontWeight: '800' },
   savedPlacesSection: { marginTop: 24 },
   savedPlacesHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 8,
   },
-  savedPlacesTitle: { color: COLORS.text, fontSize: 16, fontWeight: '800' },
-  savedPlacesRefresh: { color: COLORS.green, fontSize: 13, fontWeight: '700' },
+  savedPlacesTitle: { color: UI.peach, fontSize: 18, fontWeight: '900' },
+  savedPlacesRefresh: { color: UI.peach, fontSize: 13, fontWeight: '800' },
   limitNotice: {
-    color: COLORS.text,
+    color: UI.textSoft,
     fontSize: 12,
     lineHeight: 18,
-    marginBottom: 12,
+    marginBottom: 14,
   },
   loadingState: {
-    padding: 20,
-    borderRadius: 14,
-    backgroundColor: COLORS.surface,
+    padding: 22,
+    borderRadius: 20,
+    backgroundColor: UI.surface,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: UI.border,
     alignItems: 'center',
   },
-  loadingText: { color: COLORS.textSub, fontSize: 12, marginTop: 10 },
+  loadingText: { color: UI.textSoft, fontSize: 12, marginTop: 10 },
   emptyState: {
     padding: 18,
-    borderRadius: 14,
-    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    backgroundColor: UI.surface,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: UI.border,
   },
-  emptyStateText: { color: COLORS.textMuted, fontSize: 13, lineHeight: 20 },
+  emptyStateText: { color: UI.textMuted, fontSize: 13, lineHeight: 20 },
   savedPlaceCard: {
     padding: 14,
-    borderRadius: 14,
-    backgroundColor: COLORS.surface,
+    borderRadius: 20,
+    backgroundColor: UI.surface,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: UI.border,
     marginBottom: 12,
   },
-  savedPlaceHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 12 },
+  savedPlaceHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 8, gap: 13 },
   savedPlaceInfo: { flex: 1, minWidth: 0 },
-  savedPlaceTitle: { color: COLORS.text, fontSize: 15, fontWeight: '800' },
-  savedPlaceSub: { color: COLORS.textSub, fontSize: 12, marginTop: 4 },
-  savedPlaceMeta: { color: COLORS.textMuted, fontSize: 11, marginTop: 4 },
+  savedPlaceTitle: { color: UI.text, fontSize: 15, fontWeight: '900' },
+  savedPlaceSub: { color: UI.textSoft, fontSize: 12, marginTop: 4 },
+  savedPlaceMeta: { color: UI.textMuted, fontSize: 11, marginTop: 4 },
   savedPlaceActions: { flexDirection: 'row', gap: 10, marginTop: 14 },
   savedActionPrimary: {
-    flex: 1,
-    backgroundColor: COLORS.green,
-    borderRadius: 12,
-    paddingVertical: 12,
+    alignSelf: 'flex-end',
+    minWidth: 82,
+    backgroundColor: UI.surfaceStrong,
+    borderWidth: 1,
+    borderColor: UI.borderStrong,
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
     alignItems: 'center',
   },
-  savedActionPrimaryText: { color: '#000', fontSize: 13, fontWeight: '800' },
+  savedActionPrimaryText: { color: UI.peach, fontSize: 13, fontWeight: '900' },
 });

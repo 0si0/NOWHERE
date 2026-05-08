@@ -1,31 +1,56 @@
-import { API_KEYS, WEATHER_MOODS } from '../constants';
+import { WEATHER_MOODS } from '../constants';
 
-const BASE_URL = 'https://api.openweathermap.org/data/2.5';
-const OPENWEATHER_PLACEHOLDER = 'YOUR_OPENWEATHER_API_KEY';
+const OPEN_METEO_BASE_URL = 'https://api.open-meteo.com/v1/forecast';
+
+const WEATHER_CODE_MAP = [
+  { codes: [0], condition: 'Clear', description: '맑음' },
+  { codes: [1, 2, 3, 45, 48], condition: 'Clouds', description: '흐림' },
+  { codes: [51, 53, 55, 56, 57], condition: 'Drizzle', description: '이슬비' },
+  { codes: [61, 63, 65, 66, 67, 80, 81, 82], condition: 'Rain', description: '비' },
+  { codes: [71, 73, 75, 77, 85, 86], condition: 'Snow', description: '눈' },
+  { codes: [95, 96, 99], condition: 'Thunderstorm', description: '폭풍' },
+];
+
+function resolveWeatherCode(code) {
+  const matched = WEATHER_CODE_MAP.find((entry) => entry.codes.includes(Number(code)));
+  return matched || WEATHER_CODE_MAP[0];
+}
 
 export function isWeatherConfigured() {
-  return !!API_KEYS.OPENWEATHER && API_KEYS.OPENWEATHER !== OPENWEATHER_PLACEHOLDER;
+  return true;
 }
 
 export async function getCurrentWeather(latitude, longitude) {
-  if (!isWeatherConfigured()) {
-    throw new Error('OpenWeather API 키가 설정되지 않았습니다.');
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+    throw new Error('날씨를 가져올 위치 정보가 없습니다.');
   }
 
-  const url = `${BASE_URL}/weather?lat=${latitude}&lon=${longitude}&appid=${API_KEYS.OPENWEATHER}&units=metric&lang=kr`;
-  const response = await fetch(url);
+  const params = new URLSearchParams({
+    latitude: String(latitude),
+    longitude: String(longitude),
+    current: 'temperature_2m,relative_humidity_2m,apparent_temperature,weather_code',
+    timezone: 'auto',
+  });
+
+  const response = await fetch(`${OPEN_METEO_BASE_URL}?${params.toString()}`);
   if (!response.ok) {
     throw new Error(`Weather fetch failed (${response.status})`);
   }
+
   const data = await response.json();
+  const current = data.current || {};
+  const resolved = resolveWeatherCode(current.weather_code);
+
   return {
-    condition: data.weather[0].main,
-    description: data.weather[0].description,
-    temp: Math.round(data.main.temp),
-    feelsLike: Math.round(data.main.feels_like),
-    humidity: data.main.humidity,
-    city: data.name,
-    mood: WEATHER_MOODS[data.weather[0].main] || WEATHER_MOODS.Clear,
+    condition: resolved.condition,
+    description: resolved.description,
+    temp: Math.round(current.temperature_2m ?? 0),
+    feelsLike: Math.round(current.apparent_temperature ?? current.temperature_2m ?? 0),
+    humidity: Math.round(current.relative_humidity_2m ?? 0),
+    city: '',
+    mood: WEATHER_MOODS[resolved.condition] || WEATHER_MOODS.Clear,
+    source: 'open-meteo',
+    fetchedAt: Date.now(),
   };
 }
 

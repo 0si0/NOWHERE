@@ -54,6 +54,8 @@ function mergeNativeState(state = {}) {
     isConnected: Boolean(state.isConnected),
     isPlaying: Boolean(state.isPlaying),
     playbackStatus: state.playbackStatus || 'unknown',
+    authorizationStatus: state.authorizationStatus || state.status || 'unknown',
+    isAuthorized: Boolean(state.isAuthorized || state.authorized),
     positionMs: state.positionMs || 0,
     error: state.error || null,
     requiresActiveDevice: Boolean(state.requiresActiveDevice),
@@ -75,6 +77,14 @@ function buildPlaybackFailure(state = {}) {
     return new Error(state.error || 'Spotify 재생 요청이 실패했습니다.');
   }
   return null;
+}
+
+function isAuthorizedState(state = {}) {
+  return state?.authorizationStatus === 'authorized' || state?.isAuthorized === true;
+}
+
+function buildReconnectionRequiredError() {
+  return new Error('Spotify 재연결이 필요합니다. 설정 또는 로그인 화면에서 Spotify를 다시 연결해주세요.');
 }
 
 async function maybeResolvePlayableTrack(track) {
@@ -127,7 +137,7 @@ export const musicPlayerService = {
     return mergeNativeState(state);
   },
 
-  async requestAuthorization() {
+  async requestAuthorization(extraOptions = {}) {
     if (!isNativeNowherePlayerAvailable) {
       return { provider: 'mock', authorized: false, status: 'unavailable' };
     }
@@ -136,7 +146,7 @@ export const musicPlayerService = {
       return { provider: 'spotify', authorized: false, status: 'missingClientId' };
     }
 
-    return NativeNowherePlayer.requestAuthorizationAsync(getNativeOptions());
+    return NativeNowherePlayer.requestAuthorizationAsync(getNativeOptions(extraOptions));
   },
 
   async connect() {
@@ -156,6 +166,11 @@ export const musicPlayerService = {
       return { provider: 'spotify', authorized: false, status: 'missingClientId' };
     }
 
+    const currentState = await this.getState().catch(() => null);
+    if (!isAuthorizedState(currentState)) {
+      throw buildReconnectionRequiredError();
+    }
+
     const playablePrimerTrack = primerTrack ? await maybeResolvePlayableTrack(primerTrack) : null;
     const state = await NativeNowherePlayer.prepareAutoPlayAsync(getNativeOptions({
       autoPlayPrimer: playablePrimerTrack,
@@ -167,16 +182,64 @@ export const musicPlayerService = {
     if (!isNativeNowherePlayerAvailable || !query) {
       return [];
     }
+    const currentState = await this.getState().catch(() => null);
+    if (!isAuthorizedState(currentState)) {
+      return [];
+    }
     const results = await NativeNowherePlayer.searchCatalogAsync(query, limit);
     return (results || []).map(normalizeTrack);
+  },
+
+  async ensureAuthorizationForData() {
+    if (!isNativeNowherePlayerAvailable) {
+      return false;
+    }
+    const state = await this.getState().catch(() => null);
+    return isAuthorizedState(state);
   },
 
   async getUserPlaylists(limit = 20) {
     if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.getUserPlaylistsAsync) {
       return [];
     }
+    if (!(await this.ensureAuthorizationForData())) {
+      return [];
+    }
     const results = await NativeNowherePlayer.getUserPlaylistsAsync(Math.max(1, Math.min(limit, 50)));
     return (results || []).map((item) => normalizeTrack({ ...item, type: 'playlist' }));
+  },
+
+  async getUserTopTracks(limit = 20) {
+    if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.getUserTopTracksAsync) {
+      return [];
+    }
+    if (!(await this.ensureAuthorizationForData())) {
+      return [];
+    }
+    const results = await NativeNowherePlayer.getUserTopTracksAsync(Math.max(1, Math.min(limit, 50)));
+    return (results || []).map(normalizeTrack);
+  },
+
+  async getRecentlyPlayedTracks(limit = 20) {
+    if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.getRecentlyPlayedTracksAsync) {
+      return [];
+    }
+    if (!(await this.ensureAuthorizationForData())) {
+      return [];
+    }
+    const results = await NativeNowherePlayer.getRecentlyPlayedTracksAsync(Math.max(1, Math.min(limit, 50)));
+    return (results || []).map(normalizeTrack);
+  },
+
+  async getPlaylistTracks(playlistId, limit = 50) {
+    if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.getPlaylistTracksAsync || !playlistId) {
+      return [];
+    }
+    if (!(await this.ensureAuthorizationForData())) {
+      return [];
+    }
+    const results = await NativeNowherePlayer.getPlaylistTracksAsync(playlistId, Math.max(1, Math.min(limit, 50)));
+    return (results || []).map(normalizeTrack);
   },
 
   async play(track, queue = []) {
@@ -193,7 +256,10 @@ export const musicPlayerService = {
       });
     }
 
-    await this.requestAuthorization();
+    const currentState = await this.getState().catch(() => null);
+    if (!isAuthorizedState(currentState)) {
+      throw buildReconnectionRequiredError();
+    }
 
     const playableTrack = await maybeResolvePlayableTrack(track);
     const playableQueue = await Promise.all(
@@ -215,6 +281,11 @@ export const musicPlayerService = {
         queue: requestedQueue,
         playbackStatus: 'playing',
       });
+    }
+
+    const currentState = await this.getState().catch(() => null);
+    if (!isAuthorizedState(currentState)) {
+      throw buildReconnectionRequiredError();
     }
 
     const playableTrack = await maybeResolvePlayableTrack(track);

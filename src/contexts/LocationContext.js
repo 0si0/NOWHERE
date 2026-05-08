@@ -24,13 +24,17 @@ import {
 } from '../services/firebaseService';
 import { musicPlayerService } from '../services/musicPlayerService';
 import { getCurrentWeather, isWeatherConfigured } from '../services/weatherService';
+import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
 
 const LOCATION_TASK_NAME = 'nowhere-background-location';
 const GEOFENCE_TASK_NAME = 'nowhere-geofence-autoplay';
 const LOCATION_CACHE_KEY = '@nowhere/location-cache';
+const PLACE_NAME_CACHE_KEY = '@nowhere/place-name-cache';
 const WEATHER_CACHE_KEY = '@nowhere/weather-cache';
 const BACKGROUND_TRACKING_KEY = '@nowhere/background-tracking-enabled';
 const WEATHER_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+const PLACE_NAME_REFRESH_DISTANCE_M = 120;
+const PLACE_NAME_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BACKGROUND_LOCATION_MAX_AGE_MS = 30 * 60 * 1000;
 const AUTOPLAY_PLACE_REFRESH_INTERVAL_MS = 60 * 1000;
 
@@ -53,6 +57,35 @@ function normalizeCoords(coords) {
   };
 }
 
+function getDistanceMeters(a, b) {
+  if (!a || !b) return Number.POSITIVE_INFINITY;
+
+  const lat1 = a.latitude * Math.PI / 180;
+  const lat2 = b.latitude * Math.PI / 180;
+  const deltaLat = (b.latitude - a.latitude) * Math.PI / 180;
+  const deltaLon = (b.longitude - a.longitude) * Math.PI / 180;
+  const sinLat = Math.sin(deltaLat / 2);
+  const sinLon = Math.sin(deltaLon / 2);
+  const h = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
+  return 6371000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+}
+
+function pickNeighborhoodName(addresses = []) {
+  const address = addresses.find(Boolean) || {};
+  const candidates = [
+    address.district,
+    address.name,
+    address.street,
+    address.subregion,
+    address.city,
+    address.region,
+  ];
+
+  return candidates
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .find(Boolean) || '';
+}
+
 async function writeLocationCache(coords, source = 'foreground') {
   if (!coords) return;
 
@@ -63,6 +96,30 @@ async function writeLocationCache(coords, source = 'foreground') {
   };
 
   await AsyncStorage.setItem(LOCATION_CACHE_KEY, JSON.stringify(payload));
+}
+
+async function writePlaceNameCache(name, coords) {
+  if (!name || !coords) return;
+  await AsyncStorage.setItem(PLACE_NAME_CACHE_KEY, JSON.stringify({
+    name,
+    coords,
+    timestamp: Date.now(),
+  }));
+}
+
+async function readPlaceNameCache() {
+  const raw = await AsyncStorage.getItem(PLACE_NAME_CACHE_KEY);
+
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    await AsyncStorage.removeItem(PLACE_NAME_CACHE_KEY);
+    return null;
+  }
 }
 
 async function readLocationCache() {
@@ -172,6 +229,7 @@ export function LocationProvider({ children }) {
   const { authUser, isFirebaseConfigured, isLoading: isSessionLoading } = useSession();
   const [location, setLocation] = useState(null);
   const [lastKnownLocation, setLastKnownLocation] = useState(null);
+  const [placeName, setPlaceName] = useState('');
   const [foregroundPermission, setForegroundPermission] = useState('undetermined');
   const [backgroundPermission, setBackgroundPermission] = useState('undetermined');
   const [weather, setWeather] = useState(null);
@@ -184,8 +242,10 @@ export function LocationProvider({ children }) {
   const [lastWeatherFetchedAt, setLastWeatherFetchedAt] = useState(0);
   const autoPlayPlacesRef = useRef({ places: [], fetchedAt: 0 });
   const autoPlayInFlightRef = useRef(false);
+  const autoPlayColdStartOffAppliedRef = useRef(false);
   const playerRef = useRef(player);
   const locationRef = useRef(null);
+  const placeNameRef = useRef({ name: '', coords: null, timestamp: 0 });
   const hasForegroundPermission = foregroundPermission === 'granted';
   const hasBackgroundPermission = backgroundPermission === 'granted';
 
@@ -224,18 +284,43 @@ export function LocationProvider({ children }) {
     }
   }, [authUser?.isAnonymous, authUser?.uid, isFirebaseConfigured, isSessionLoading]);
 
+  const stopGeofenceRegions = useCallback(async () => {
+    if (Platform.OS === 'web') {
+      return;
+    }
+
+    try {
+      if (typeof Location.hasStartedGeofencingAsync === 'function') {
+        const geofenceStarted = await Location.hasStartedGeofencingAsync(GEOFENCE_TASK_NAME);
+        if (geofenceStarted) {
+          await Location.stopGeofencingAsync(GEOFENCE_TASK_NAME);
+        }
+        return;
+      }
+
+      await Location.stopGeofencingAsync(GEOFENCE_TASK_NAME).catch(() => {});
+    } catch (error) {
+      // Geofence 정리는 부가 작업이다. 실패해도 위치/추천 화면을 흔들지 않는다.
+    }
+  }, []);
+
   const syncGeofenceRegions = useCallback(async (places) => {
     if (Platform.OS === 'web') {
       return;
     }
 
     const regions = buildGeofenceRegions(places);
+    if (regions.length === 0) {
+      await stopGeofenceRegions();
+      return;
+    }
+
     try {
       await Location.startGeofencingAsync(GEOFENCE_TASK_NAME, regions);
     } catch (error) {
       setLocationError((prev) => prev || serializeError(error));
     }
-  }, []);
+  }, [stopGeofenceRegions]);
 
   const reloadAutoPlayPlaces = useCallback(async () => {
     const places = await refreshAutoPlayPlaces({ force: true });
@@ -265,6 +350,19 @@ export function LocationProvider({ children }) {
       await markAutoPlayTriggered(place.id);
       setAutoPlayStatus({ status: 'playing', place, error: null });
 
+      recordListeningEvent({
+        userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
+        track: target,
+        source: 'autoplay',
+        recommendationSlot: 'place-autoplay',
+        context: buildListeningContext({
+          location: coords || locationRef.current,
+          weather,
+          place,
+          savedPlaceId: place.id,
+        }),
+      }).catch(() => {});
+
       if (isFirebaseConfigured && authUser?.uid && !authUser.isAnonymous) {
         savePlayRecord({
           userId: authUser.uid,
@@ -287,7 +385,7 @@ export function LocationProvider({ children }) {
     } finally {
       autoPlayInFlightRef.current = false;
     }
-  }, [authUser?.isAnonymous, authUser?.uid, autoPlayModeEnabled, hasBackgroundPermission, isFirebaseConfigured]);
+  }, [authUser?.isAnonymous, authUser?.uid, autoPlayModeEnabled, hasBackgroundPermission, isFirebaseConfigured, weather]);
 
   const evaluateAutoPlay = useCallback(async (coords, source = 'foreground') => {
     if (!autoPlayModeEnabled || !hasBackgroundPermission) {
@@ -336,12 +434,45 @@ export function LocationProvider({ children }) {
       await writeWeatherCache(nextWeather);
       return nextWeather;
     } catch (error) {
-      setLocationError((prev) => prev || serializeError(error));
-      return null;
+      setLastWeatherFetchedAt(Date.now());
+      return weather;
     } finally {
       setIsFetchingWeather(false);
     }
   }, [lastWeatherFetchedAt, weather]);
+
+  const refreshPlaceName = useCallback(async (coords, { force = false } = {}) => {
+    if (!coords) {
+      return '';
+    }
+
+    const current = placeNameRef.current;
+    const isFreshEnough = current.timestamp && Date.now() - current.timestamp < PLACE_NAME_CACHE_MAX_AGE_MS;
+    const isCloseEnough = getDistanceMeters(coords, current.coords) < PLACE_NAME_REFRESH_DISTANCE_M;
+    if (!force && current.name && isFreshEnough && isCloseEnough) {
+      setPlaceName(current.name);
+      return current.name;
+    }
+
+    try {
+      const addresses = await Location.reverseGeocodeAsync({
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+      });
+      const nextName = pickNeighborhoodName(addresses);
+      if (nextName) {
+        const payload = { name: nextName, coords, timestamp: Date.now() };
+        placeNameRef.current = payload;
+        setPlaceName(nextName);
+        await writePlaceNameCache(nextName, coords);
+        return nextName;
+      }
+    } catch (error) {
+      // 위치명은 부가 정보이므로 실패해도 위치/날씨/자동재생 흐름은 유지한다.
+    }
+
+    return current.name || '';
+  }, []);
 
   const refreshLocation = useCallback(async ({ forceWeather = false } = {}) => {
     const permissions = await refreshPermissions();
@@ -364,6 +495,7 @@ export function LocationProvider({ children }) {
       setLocation(coords);
       setLastKnownLocation(coords);
       await writeLocationCache(coords, 'foreground');
+      await refreshPlaceName(coords);
       await refreshWeather(coords, { force: forceWeather });
       await evaluateAutoPlay(coords, 'foreground-refresh');
       return coords;
@@ -375,6 +507,7 @@ export function LocationProvider({ children }) {
         setLocation(fallback);
         setLastKnownLocation(fallback);
         await writeLocationCache(fallback, 'last-known');
+        await refreshPlaceName(fallback);
         await refreshWeather(fallback, { force: forceWeather });
         await evaluateAutoPlay(fallback, 'last-known');
       }
@@ -384,7 +517,7 @@ export function LocationProvider({ children }) {
     } finally {
       setIsLocating(false);
     }
-  }, [evaluateAutoPlay, refreshPermissions, refreshWeather]);
+  }, [evaluateAutoPlay, refreshPermissions, refreshPlaceName, refreshWeather]);
 
   const requestPermissions = useCallback(async () => {
     setLocationError(null);
@@ -499,33 +632,35 @@ export function LocationProvider({ children }) {
     return state;
   }, [refreshAutoPlayPlaces, setAutoPlayModeEnabled]);
 
+  const forceAutoPlayOff = useCallback(async () => {
+    await writeAutoPlayModeEnabled(false);
+    await AsyncStorage.setItem(BACKGROUND_TRACKING_KEY, 'false');
+    setAutoPlayModeEnabledState(false);
+    setBackgroundTrackingEnabled(false);
+    setAutoPlayStatus({ status: 'idle', place: null, error: null });
+  }, []);
+
   const stopBackgroundTracking = useCallback(async () => {
     if (Platform.OS !== 'web') {
       const alreadyStarted = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
       if (alreadyStarted) {
         await Location.stopLocationUpdatesAsync(LOCATION_TASK_NAME);
       }
-      if (typeof Location.hasStartedGeofencingAsync === 'function') {
-        const geofenceStarted = await Location.hasStartedGeofencingAsync(GEOFENCE_TASK_NAME);
-        if (geofenceStarted) {
-          await Location.stopGeofencingAsync(GEOFENCE_TASK_NAME);
-        }
-      } else {
-        await Location.stopGeofencingAsync(GEOFENCE_TASK_NAME).catch(() => {});
-      }
+      await stopGeofenceRegions();
     }
 
     await AsyncStorage.setItem(BACKGROUND_TRACKING_KEY, 'false');
     setBackgroundTrackingEnabled(false);
     return true;
-  }, []);
+  }, [stopGeofenceRegions]);
 
   useEffect(() => {
     let subscription;
 
     const bootstrap = async () => {
-      const [cachedLocation, cachedWeather, savedTrackingPreference, savedAutoPlayMode] = await Promise.all([
+      const [cachedLocation, cachedPlaceName, cachedWeather, savedTrackingPreference, savedAutoPlayMode] = await Promise.all([
         readLocationCache(),
+        readPlaceNameCache(),
         readWeatherCache(),
         AsyncStorage.getItem(BACKGROUND_TRACKING_KEY),
         readAutoPlayModeEnabled(),
@@ -541,26 +676,31 @@ export function LocationProvider({ children }) {
         setLastWeatherFetchedAt(cachedWeather.timestamp || 0);
       }
 
+      if (cachedPlaceName?.name) {
+        placeNameRef.current = cachedPlaceName;
+        setPlaceName(cachedPlaceName.name);
+      }
+
       const permissions = await refreshPermissions();
       const hasAlwaysPermission = permissions.hasBackgroundPermission;
-      const isTrackingPreferred = savedTrackingPreference === 'true' && hasAlwaysPermission;
-      const shouldShowAutoPlayOn = savedAutoPlayMode && hasAlwaysPermission;
-      setAutoPlayModeEnabledState(shouldShowAutoPlayOn);
-      if (savedAutoPlayMode && !hasAlwaysPermission) {
-        await writeAutoPlayModeEnabled(false);
-      }
-      if (savedTrackingPreference === 'true' && !hasAlwaysPermission) {
-        await AsyncStorage.setItem(BACKGROUND_TRACKING_KEY, 'false');
+      if (!autoPlayColdStartOffAppliedRef.current) {
+        autoPlayColdStartOffAppliedRef.current = true;
+        if (savedAutoPlayMode || savedTrackingPreference === 'true') {
+          await forceAutoPlayOff();
+          if (Platform.OS !== 'web') {
+            await stopBackgroundTracking();
+          }
+        } else {
+          await forceAutoPlayOff();
+        }
       }
 
       if (Platform.OS !== 'web') {
         const isRegistered = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
-        setBackgroundTrackingEnabled((isTrackingPreferred || isRegistered) && hasAlwaysPermission);
-
-        if (isTrackingPreferred && permissions.hasBackgroundPermission && !isRegistered) {
-          await startBackgroundTracking();
-        } else if (permissions.hasBackgroundPermission) {
-          await reloadAutoPlayPlaces();
+        if (isRegistered && !autoPlayModeEnabled) {
+          await stopBackgroundTracking();
+        } else {
+          setBackgroundTrackingEnabled(isRegistered && hasAlwaysPermission && autoPlayModeEnabled);
         }
       }
 
@@ -583,8 +723,8 @@ export function LocationProvider({ children }) {
 
           setLocation(coords);
           setLastKnownLocation(coords);
-          setLocationError(null);
           await writeLocationCache(coords, 'foreground-watch');
+          await refreshPlaceName(coords);
           await refreshWeather(coords);
           await evaluateAutoPlay(coords, 'foreground-watch');
         }
@@ -602,23 +742,27 @@ export function LocationProvider({ children }) {
       }
 
       const permissions = await refreshPermissions();
-      if (!permissions.hasBackgroundPermission) {
-        await writeAutoPlayModeEnabled(false);
-        await AsyncStorage.setItem(BACKGROUND_TRACKING_KEY, 'false');
-        setAutoPlayModeEnabledState(false);
-        setBackgroundTrackingEnabled(false);
+      const shouldDisableAutoPlay = autoPlayModeEnabled || !permissions.hasBackgroundPermission;
+      if (shouldDisableAutoPlay) {
+        await forceAutoPlayOff();
+        if (Platform.OS !== 'web') {
+          await stopBackgroundTracking();
+        }
       }
 
       const cached = await readLocationCache();
       if (cached?.coords && Date.now() - (cached.timestamp || 0) < BACKGROUND_LOCATION_MAX_AGE_MS) {
         setLocation(cached.coords);
         setLastKnownLocation(cached.coords);
+        await refreshPlaceName(cached.coords);
         await refreshWeather(cached.coords);
-        await evaluateAutoPlay(cached.coords, 'app-active-cache');
+        if (!shouldDisableAutoPlay) {
+          await evaluateAutoPlay(cached.coords, 'app-active-cache');
+        }
       }
 
       const pendingAutoPlay = await consumePendingAutoPlay();
-      if (pendingAutoPlay?.place) {
+      if (!shouldDisableAutoPlay && autoPlayModeEnabled && pendingAutoPlay?.place) {
         await executeAutoPlay(pendingAutoPlay.place, pendingAutoPlay.source || 'app-active', cached?.coords || locationRef.current);
       }
 
@@ -631,13 +775,17 @@ export function LocationProvider({ children }) {
   }, [
     evaluateAutoPlay,
     executeAutoPlay,
+    forceAutoPlayOff,
     refreshAutoPlayPlaces,
     reloadAutoPlayPlaces,
     refreshLocation,
     refreshPermissions,
+    refreshPlaceName,
     refreshWeather,
     startBackgroundTracking,
+    stopBackgroundTracking,
     syncGeofenceRegions,
+    autoPlayModeEnabled,
   ]);
 
   return (
@@ -645,6 +793,7 @@ export function LocationProvider({ children }) {
       value={{
         location,
         lastKnownLocation,
+        placeName,
         weather,
         foregroundPermission,
         backgroundPermission,
@@ -660,6 +809,7 @@ export function LocationProvider({ children }) {
         requestPermissions,
         refreshPermissions,
         refreshLocation,
+        refreshPlaceName,
         refreshWeather,
         refreshAutoPlayPlaces,
         reloadAutoPlayPlaces,

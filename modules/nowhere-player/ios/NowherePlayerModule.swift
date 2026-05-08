@@ -5,6 +5,9 @@ import Foundation
 import UIKit
 
 public final class NowherePlayerModule: Module, @unchecked Sendable {
+  private let tokenStorageAccessTokenKey = "nowhere.spotify.accessToken"
+  private let tokenStorageRefreshTokenKey = "nowhere.spotify.refreshToken"
+  private let tokenStorageExpiresAtKey = "nowhere.spotify.expiresAt"
   private var clientId = ""
   private var redirectUri = "com.nowhere.nowhere://spotify-auth"
   private var accessToken: String?
@@ -41,7 +44,7 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
 
     AsyncFunction("requestAuthorizationAsync") { (options: [String: Any]) async throws -> [String: Any?] in
       self.applyOptions(options)
-      try await self.ensureAuthorized()
+      try await self.ensureAuthorized(forcePrompt: self.firstBool(options, keys: ["forcePrompt", "showDialog"]))
       return [
         "provider": "spotify",
         "available": true,
@@ -65,6 +68,21 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     AsyncFunction("getUserPlaylistsAsync") { (limit: Int) async throws -> [[String: Any?]] in
       try await self.ensureAuthorized()
       return try await self.getUserSpotifyPlaylists(limit: max(1, min(limit, 50)))
+    }
+
+    AsyncFunction("getUserTopTracksAsync") { (limit: Int) async throws -> [[String: Any?]] in
+      try await self.ensureAuthorized()
+      return try await self.getUserSpotifyTopTracks(limit: max(1, min(limit, 50)))
+    }
+
+    AsyncFunction("getRecentlyPlayedTracksAsync") { (limit: Int) async throws -> [[String: Any?]] in
+      try await self.ensureAuthorized()
+      return try await self.getSpotifyRecentlyPlayedTracks(limit: max(1, min(limit, 50)))
+    }
+
+    AsyncFunction("getPlaylistTracksAsync") { (playlistId: String, limit: Int) async throws -> [[String: Any?]] in
+      try await self.ensureAuthorized()
+      return try await self.getSpotifyPlaylistTracks(playlistId: playlistId, limit: max(1, min(limit, 50)))
     }
 
     AsyncFunction("prepareAutoPlayAsync") { (options: [String: Any]) async throws -> [String: Any?] in
@@ -220,6 +238,7 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
   }
 
   private func applyOptions(_ options: [String: Any]) {
+    loadPersistedSpotifySession()
     if let nextClientId = firstString(options, keys: ["spotifyClientId", "clientId"]) {
       clientId = nextClientId
     }
@@ -239,25 +258,35 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     }
   }
 
-  private func ensureAuthorized() async throws {
-    if accessToken != nil, let expiresAt = tokenExpiresAt, expiresAt.timeIntervalSinceNow > 60 {
+  private func ensureAuthorized(forcePrompt: Bool = false) async throws {
+    loadPersistedSpotifySession()
+
+    if !forcePrompt, accessToken != nil, let expiresAt = tokenExpiresAt, expiresAt.timeIntervalSinceNow > 60 {
       return
     }
 
-    if let refreshToken {
+    if !forcePrompt, let refreshToken {
       do {
         try await refreshAccessToken(refreshToken)
         return
       } catch {
         accessToken = nil
         tokenExpiresAt = nil
+        persistSpotifySession()
       }
     }
 
-    try await authorizeWithPKCE()
+    try await authorizeWithPKCE(forcePrompt: forcePrompt)
   }
 
-  private func authorizeWithPKCE() async throws {
+  private func hasValidAccessToken() -> Bool {
+    guard accessToken != nil, let expiresAt = tokenExpiresAt else {
+      return false
+    }
+    return expiresAt.timeIntervalSinceNow > 60
+  }
+
+  private func authorizeWithPKCE(forcePrompt: Bool = false) async throws {
     guard !clientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       throw NowherePlayerException("Spotify client id is missing.")
     }
@@ -273,12 +302,14 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       "streaming",
       "user-read-playback-state",
       "user-modify-playback-state",
+      "user-top-read",
+      "user-read-recently-played",
       "playlist-read-private",
       "playlist-read-collaborative"
     ].joined(separator: " ")
 
     var components = URLComponents(string: "https://accounts.spotify.com/authorize")
-    components?.queryItems = [
+    var queryItems = [
       URLQueryItem(name: "client_id", value: clientId),
       URLQueryItem(name: "response_type", value: "code"),
       URLQueryItem(name: "redirect_uri", value: redirectUri),
@@ -287,6 +318,10 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       URLQueryItem(name: "state", value: state),
       URLQueryItem(name: "scope", value: scopes)
     ]
+    if forcePrompt {
+      queryItems.append(URLQueryItem(name: "show_dialog", value: "true"))
+    }
+    components?.queryItems = queryItems
 
     guard let authURL = components?.url else {
       throw NowherePlayerException("Spotify authorization URL could not be built.")
@@ -498,6 +533,63 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     return items.map(serializeSpotifyPlaylist)
   }
 
+  private func getUserSpotifyTopTracks(limit: Int) async throws -> [[String: Any?]] {
+    var components = URLComponents()
+    components.path = "/v1/me/top/tracks"
+    components.queryItems = [
+      URLQueryItem(name: "limit", value: String(limit)),
+      URLQueryItem(name: "time_range", value: "medium_term")
+    ]
+    let json = try await spotifyJSONRequest(path: components.string ?? "/v1/me/top/tracks?limit=\(limit)&time_range=medium_term", method: "GET")
+    let items = json?["items"] as? [[String: Any]] ?? []
+    return items.map(serializeSpotifyTrack)
+  }
+
+  private func getSpotifyRecentlyPlayedTracks(limit: Int) async throws -> [[String: Any?]] {
+    var components = URLComponents()
+    components.path = "/v1/me/player/recently-played"
+    components.queryItems = [
+      URLQueryItem(name: "limit", value: String(limit))
+    ]
+    let json = try await spotifyJSONRequest(path: components.string ?? "/v1/me/player/recently-played?limit=\(limit)", method: "GET")
+    let items = json?["items"] as? [[String: Any]] ?? []
+    return items.compactMap { item in
+      guard let track = item["track"] as? [String: Any] else {
+        return nil
+      }
+      var serialized = serializeSpotifyTrack(track)
+      serialized["playedAt"] = firstString(item, keys: ["played_at"]) ?? ""
+      return serialized
+    }
+  }
+
+  private func getSpotifyPlaylistTracks(playlistId: String, limit: Int) async throws -> [[String: Any?]] {
+    let trimmedPlaylistId = playlistId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedPlaylistId.isEmpty else {
+      return []
+    }
+
+    var components = URLComponents()
+    components.path = "/v1/playlists/\(trimmedPlaylistId)/tracks"
+    components.queryItems = [
+      URLQueryItem(name: "limit", value: String(limit)),
+      URLQueryItem(name: "offset", value: "0"),
+      URLQueryItem(name: "market", value: "KR")
+    ]
+    let json = try await spotifyJSONRequest(
+      path: components.string ?? "/v1/playlists/\(trimmedPlaylistId)/tracks?limit=\(limit)&offset=0&market=KR",
+      method: "GET"
+    )
+    let items = json?["items"] as? [[String: Any]] ?? []
+    return items.compactMap { item in
+      guard let track = item["track"] as? [String: Any],
+            firstString(track, keys: ["type"]) == nil || firstString(track, keys: ["type"]) == "track" else {
+        return nil
+      }
+      return serializeSpotifyTrack(track)
+    }
+  }
+
   private func resolvePlayableTracks(_ tracks: [[String: Any]]) async throws -> [[String: Any?]] {
     var resolved: [[String: Any?]] = []
     for track in tracks {
@@ -554,20 +646,60 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     }
     let expiresIn = json["expires_in"] as? Double ?? 3600
     tokenExpiresAt = Date().addingTimeInterval(expiresIn)
+    persistSpotifySession()
     appRemoteCoordinator.setAccessToken(accessToken)
     configureAppRemote()
   }
 
+  private func loadPersistedSpotifySession() {
+    let defaults = UserDefaults.standard
+    if accessToken == nil {
+      accessToken = defaults.string(forKey: tokenStorageAccessTokenKey)
+    }
+    if refreshToken == nil {
+      refreshToken = defaults.string(forKey: tokenStorageRefreshTokenKey)
+    }
+    if tokenExpiresAt == nil {
+      let rawExpiresAt = defaults.double(forKey: tokenStorageExpiresAtKey)
+      if rawExpiresAt > 0 {
+        tokenExpiresAt = Date(timeIntervalSince1970: rawExpiresAt)
+      }
+    }
+  }
+
+  private func persistSpotifySession() {
+    let defaults = UserDefaults.standard
+    if let accessToken {
+      defaults.set(accessToken, forKey: tokenStorageAccessTokenKey)
+    } else {
+      defaults.removeObject(forKey: tokenStorageAccessTokenKey)
+    }
+    if let refreshToken {
+      defaults.set(refreshToken, forKey: tokenStorageRefreshTokenKey)
+    } else {
+      defaults.removeObject(forKey: tokenStorageRefreshTokenKey)
+    }
+    if let tokenExpiresAt {
+      defaults.set(tokenExpiresAt.timeIntervalSince1970, forKey: tokenStorageExpiresAtKey)
+    } else {
+      defaults.removeObject(forKey: tokenStorageExpiresAtKey)
+    }
+  }
+
   private func applyAppRemotePlayerState(_ payload: [String: Any?]) {
+    let nextUri = payload["spotifyUri"] as? String ?? payload["uri"] as? String ?? ""
+    let previousUri = currentTrack?["spotifyUri"] as? String ?? currentTrack?["uri"] as? String ?? ""
+    let retainedArtworkUrl = nextUri == previousUri ? currentTrack?["artworkUrl"] ?? "" : ""
+
     currentTrack = [
-      "id": payload["spotifyUri"] ?? payload["uri"] ?? "",
+      "id": nextUri,
       "spotifyUri": payload["spotifyUri"] ?? "",
       "uri": payload["uri"] ?? "",
       "provider": "spotify",
       "title": payload["title"] ?? "Unknown Track",
       "artist": payload["artist"] ?? "Unknown Artist",
       "album": payload["album"] ?? "",
-      "artworkUrl": currentTrack?["artworkUrl"] ?? "",
+      "artworkUrl": retainedArtworkUrl,
       "durationMs": payload["durationMs"] ?? 0
     ]
     positionMs = payload["positionMs"] as? Int ?? positionMs
@@ -671,13 +803,14 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     [
       "provider": "spotify",
       "available": true,
-      "isConnected": accessToken != nil,
+      "isConnected": hasValidAccessToken(),
       "isPlaying": isPlaying,
       "playbackStatus": playbackStatus,
       "positionMs": positionMs,
       "currentTrack": currentTrack,
       "queue": playbackQueue,
-      "authorizationStatus": accessToken == nil ? "notDetermined" : "authorized",
+      "authorizationStatus": hasValidAccessToken() ? "authorized" : "notDetermined",
+      "isAuthorized": hasValidAccessToken(),
       "error": lastError,
       "requiresActiveDevice": playbackStatus == "noActiveDevice"
     ]
@@ -733,6 +866,21 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       }
     }
     return nil
+  }
+
+  private func firstBool(_ source: [String: Any], keys: [String]) -> Bool {
+    for key in keys {
+      if let value = source[key] as? Bool {
+        return value
+      }
+      if let value = source[key] as? String {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if ["true", "1", "yes"].contains(normalized) {
+          return true
+        }
+      }
+    }
+    return false
   }
 
   private func parseJSONObject(_ data: Data) throws -> [String: Any] {

@@ -1,4 +1,4 @@
-import React, { useContext, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Image,
@@ -13,65 +13,96 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { PlayerContext } from '../contexts/PlayerContext';
 import { LocationContext } from '../contexts/LocationContext';
+import { useSession } from '../contexts/SessionContext';
+import ChallengePanel from '../components/ChallengePanel';
+import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
+import { clearRecommendationCache, getChallengeRecommendation, getRecommendationSlots } from '../services/recommendationService';
 import { getWeatherMoodLabel } from '../services/weatherService';
 
 const EMPTY_MARK = require('../../assets/EmptyMark.png');
+const CHALLENGE_MARK = require('../../assets/ChallengeMark.png');
+
+const UI = {
+  bg: '#05070A',
+  text: '#FFF1EC',
+  textSoft: '#D9C6C0',
+  textMuted: '#9E908D',
+  peach: '#FFC8B8',
+  peachStrong: '#FFB09E',
+  border: 'rgba(255, 201, 184, 0.32)',
+  surface: 'rgba(34, 31, 30, 0.72)',
+  surfaceDark: 'rgba(14, 14, 15, 0.72)',
+  green: '#6EE89A',
+};
 
 const FEATURE_ACTIONS = [
-  { key: 'place', label: '장소 정하기', icon: 'location-outline', screen: 'PlaceSetup' },
+  { key: 'place', label: '장소에 남기기', icon: 'location-outline', screen: 'PlaceSetup' },
   { key: 'map', label: '뮤직지도', icon: 'map-outline', screen: 'MusicMap' },
   { key: 'like', label: '좋아요', icon: 'heart-outline' },
-  { key: 'share', label: 'Shall we\nShare?', icon: 'arrow-redo-outline', screen: 'Vibe' },
+  { key: 'share', label: 'Shall We Share', icon: 'arrow-redo-outline', screen: 'Vibe' },
 ];
 
-const RECOMMENDED_TRACKS = [
+const SPOTIFY_REQUIRED_SLOT = {
+  id: 'spotify-required-recommendation',
+  slotType: 'taste',
+  source: 'taste',
+  sourceLabel: 'Spotify 연결 필요',
+  title: 'Spotify 연결 필요',
+  artist: '권한 확인 후 추천을 불러옵니다',
+  color: '#A98791',
+  reason: 'Spotify 권한과 실행 상태를 확인해야 추천을 만들 수 있어요.',
+  isActionRequired: true,
+};
+
+const INITIAL_RECOMMENDATION_SLOTS = [
+  { ...SPOTIFY_REQUIRED_SLOT, id: 'spotify-required-taste', slotType: 'taste', source: 'taste', sourceLabel: '요즘 자주 듣는곡' },
+  { ...SPOTIFY_REQUIRED_SLOT, id: 'spotify-required-time', slotType: 'time', source: 'time', sourceLabel: '오늘 이 시간의 추천' },
+  { ...SPOTIFY_REQUIRED_SLOT, id: 'spotify-required-place', slotType: 'place', source: 'place', sourceLabel: '이곳에 어울리는 곡' },
+  { ...SPOTIFY_REQUIRED_SLOT, id: 'spotify-required-weather', slotType: 'weather', source: 'weather', sourceLabel: '오늘 이 날씨의 추천' },
   {
-    id: 'place-recommended-track',
-    source: 'place',
-    sourceLabel: '장소 추천',
-    title: "Nothing's Gonna Hurt You Baby",
-    artist: 'Cigarettes After Sex',
-    album: 'I.',
-    color: '#FF9B91',
-    spotifyUrl: 'https://open.spotify.com/track/1W7Eajq8Hlqiy39QnuKjvD',
-    reason: '비 오는 성수동 카페에 어울리는 추천',
-  },
-  {
-    id: 'weather-recommended-track',
-    source: 'weather',
-    sourceLabel: '날씨 추천',
-    title: 'Cherry Wine',
-    artist: 'Hozier',
-    album: 'Spotify',
-    color: '#D69A86',
-    spotifyUrl: 'https://open.spotify.com/track/0QnW4TK50P6O4LI9UmXU8q',
-    reason: '촉촉한 밤공기와 어울리는 추천',
-  },
-  {
-    id: 'time-recommended-track',
-    source: 'time',
-    sourceLabel: '시간 추천',
-    title: 'Thinkin Bout You',
-    artist: 'Frank Ocean',
-    album: 'Spotify',
-    color: '#C9968C',
-    spotifyUrl: 'https://open.spotify.com/track/7DfFc7a6Rwfi3YQMRbDMau',
-    reason: '이 시간대에 자주 어울리는 추천',
-  },
-  {
-    id: 'favorite-recommended-track',
-    source: 'favorite',
-    sourceLabel: '취향 추천',
-    title: 'Night Owl',
-    artist: 'Galimatias',
-    album: 'Spotify',
-    color: '#A98791',
-    spotifyUrl: 'https://open.spotify.com/track/2WlO6U5m0pyQ5xXyDqS1V3',
-    reason: '추천 후보가 부족할 때 이어지는 취향 기반 추천',
+    id: 'pending-challenge',
+    slotType: 'challenge',
+    source: 'challenge',
+    sourceLabel: '오늘은 어떤 곡에 도전해볼까요?',
+    title: 'CHALLENGE',
+    artist: '새로운 음악 도전',
+    color: '#B99BFF',
+    reason: '오늘은 어떤 곡에 도전해볼까요?',
+    isChallenge: true,
   },
 ];
 
-const FALLBACK_TRACK = RECOMMENDED_TRACKS[0];
+const FALLBACK_TRACK = SPOTIFY_REQUIRED_SLOT;
+
+function getTrackKey(track = {}) {
+  if (track.isPending || track.isActionRequired) return '';
+  return track.spotifyUri || track.id || `${track.title || ''}-${track.artist || ''}`;
+}
+
+function getTrackExcludeKeys(track = {}) {
+  if (track.isPending || track.isActionRequired) return [];
+  return [
+    track.spotifyUri,
+    track.uri,
+    track.id,
+    `${track.title || ''}-${track.artist || ''}`,
+    `${track.title || ''}::${track.artist || ''}`,
+  ].filter(Boolean);
+}
+
+function isPlayableRecommendationSlot(slot = {}) {
+  return Boolean(
+    slot &&
+    !slot.isPending &&
+    !slot.isActionRequired &&
+    !slot.isChallenge &&
+    slot.slotType !== 'challenge' &&
+    slot.spotifyUri &&
+    slot.title &&
+    slot.artist &&
+    slot.artworkUrl
+  );
+}
 
 function formatTimeLabel() {
   const now = new Date();
@@ -81,54 +112,131 @@ function formatTimeLabel() {
   return `${period} ${hours % 12 || 12}:${minutes}`;
 }
 
-function ContextChip({ icon, label, compact }) {
-  return (
-    <View style={styles.contextChip}>
-      <Ionicons name={icon} size={compact ? 15 : 17} color="#FFD2C9" />
-      <Text style={[styles.contextChipText, compact && styles.contextChipTextCompact]} numberOfLines={1}>{label}</Text>
-    </View>
-  );
+function getTimeWord() {
+  const hour = new Date().getHours();
+  if (hour < 6) return '새벽';
+  if (hour < 12) return '아침';
+  if (hour < 17) return '오후';
+  if (hour < 21) return '저녁';
+  return '밤';
 }
 
-function ActionTile({ action, onPress, tileHeight, compact }) {
-  return (
-    <TouchableOpacity style={[styles.actionTile, { height: tileHeight }]} activeOpacity={0.82} onPress={onPress}>
-      <Ionicons name={action.icon} size={compact ? 34 : 42} color="#FFD2C9" />
-      <Text style={[styles.actionLabel, compact && styles.actionLabelCompact]}>{action.label}</Text>
-    </TouchableOpacity>
-  );
+function getWeatherIcon(condition, hour = new Date().getHours()) {
+  if (condition === 'Clear') {
+    return hour >= 18 || hour < 6 ? 'moon-outline' : 'sunny-outline';
+  }
+  if (condition === 'Clouds') return 'cloudy-outline';
+  if (condition === 'Rain' || condition === 'Drizzle') return 'rainy-outline';
+  if (condition === 'Snow') return 'snow-outline';
+  if (condition === 'Thunderstorm') return 'thunderstorm-outline';
+  return 'partly-sunny-outline';
+}
+
+function buildArtworkSource(artworkUrl) {
+  return artworkUrl ? { uri: artworkUrl, cache: 'reload' } : EMPTY_MARK;
+}
+
+function getRecommendationCaption(slotType) {
+  switch (slotType) {
+    case 'taste':
+      return '요즘 자주 듣는곡';
+    case 'time':
+      return '오늘 이 시간의 추천';
+    case 'place':
+      return '이곳에 어울리는 곡';
+    case 'weather':
+      return '오늘 이 날씨의 추천';
+    case 'challenge':
+      return '도전해보세요';
+    default:
+      return '오늘의 추천';
+  }
 }
 
 function fitTitleSize(title, compact) {
   const length = title.length;
-  if (length > 34) return compact ? 16 : 18;
-  if (length > 26) return compact ? 18 : 21;
-  if (length > 20) return compact ? 20 : 24;
-  return compact ? 24 : 30;
+  if (length > 36) return compact ? 15 : 20;
+  if (length > 28) return compact ? 17 : 23;
+  if (length > 20) return compact ? 20 : 27;
+  return compact ? 24 : 31;
 }
 
-function NowPlayingPill({ currentTrack, playerStatus, height, bottom, compact }) {
+function ContextChip({ icon, label, compact }) {
+  return (
+    <View style={styles.contextChip}>
+      <Ionicons name={icon} size={compact ? 16 : 18} color={UI.peach} />
+      <Text
+        style={[styles.contextChipText, compact && styles.contextChipTextCompact]}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.72}
+      >
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+function ActionTile({ action, onPress, compact, active, disabled }) {
+  return (
+    <TouchableOpacity
+      style={[styles.actionTile, active && styles.actionTileActive, disabled && styles.actionTileDisabled]}
+      activeOpacity={0.82}
+      onPress={onPress}
+      disabled={disabled}
+    >
+      <Ionicons
+        name={active && action.key === 'like' ? 'heart' : action.icon}
+        size={compact ? 22 : 26}
+        color={active ? UI.green : UI.peach}
+      />
+      <Text
+        style={[styles.actionLabel, compact && styles.actionLabelCompact]}
+        numberOfLines={2}
+        adjustsFontSizeToFit
+        minimumFontScale={0.7}
+      >
+        {action.label}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+function NowPlayingCard({ currentTrack, playerStatus, compact }) {
   const track = currentTrack || FALLBACK_TRACK;
   const isPlaying = Boolean(playerStatus?.isPlaying);
-  const statusText = isPlaying ? 'Spotify에서 재생 중' : 'Spotify 재생 대기';
-
   return (
-    <View style={[styles.nowPlayingPill, { height, bottom, borderRadius: height / 2 }]}>
+    <View style={styles.nowPlayingCard}>
+      <Image
+        source={buildArtworkSource(track?.artworkUrl)}
+        style={[styles.nowPlayingArtwork, compact && styles.nowPlayingArtworkCompact]}
+      />
       <View style={styles.nowPlayingTextWrap}>
-        <Text style={[styles.nowPlayingEyebrow, compact && styles.nowPlayingEyebrowCompact]}>N O W   P L A Y I N G</Text>
-        <Text style={[styles.nowPlayingTitle, compact && styles.nowPlayingTitleCompact]} numberOfLines={1}>
-          {track.title}  ·  {track.artist}
+        <Text
+          style={styles.nowPlayingEyebrow}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.72}
+        >
+          N O W   P L A Y I N G
         </Text>
-        <Text style={[styles.nowPlayingSub, compact && styles.nowPlayingSubCompact]}>{statusText}</Text>
+        <Text style={[styles.nowPlayingTitle, compact && styles.nowPlayingTitleCompact]} numberOfLines={1}>
+          {track.title}
+        </Text>
+        <Text style={styles.nowPlayingSub} numberOfLines={1}>
+          {isPlaying ? 'Spotify에서 재생 중' : 'Spotify 재생 대기'}
+        </Text>
       </View>
-      <Ionicons name="stats-chart-outline" size={compact ? 24 : 29} color="#FFB4A9" />
+      <Ionicons name="stats-chart-outline" size={24} color={UI.peach} />
     </View>
   );
 }
 
 export default function HomeScreen({ navigation }) {
-  const { play, currentTrack, playerStatus } = useContext(PlayerContext);
+  const { play, currentTrack, playerStatus, prepareAutoPlay, requestAuthorization, getState } = useContext(PlayerContext);
   const {
+    location,
+    placeName,
     weather,
     hasForegroundPermission,
     hasBackgroundPermission,
@@ -139,46 +247,82 @@ export default function HomeScreen({ navigation }) {
     prepareAutoPlayMode,
     requestPermissions,
   } = useContext(LocationContext);
+  const { authUser } = useSession();
   const { width, height } = useWindowDimensions();
   const [timeLabel, setTimeLabel] = useState(formatTimeLabel());
-  const [isActionPanelOpen, setIsActionPanelOpen] = useState(false);
+  const [isChallengeOpen, setIsChallengeOpen] = useState(false);
   const [selectedTrackIndex, setSelectedTrackIndex] = useState(0);
-  const [artworkByTrackId, setArtworkByTrackId] = useState({});
+  const [recommendationSlots, setRecommendationSlots] = useState(INITIAL_RECOMMENDATION_SLOTS);
+  const [isLoadingRecommendations, setIsLoadingRecommendations] = useState(true);
+  const [likedTrackId, setLikedTrackId] = useState('');
+  const [likeFeedback, setLikeFeedback] = useState('');
+  const recommendationRefreshInFlightRef = useRef(false);
+  const selectedTrackKeyRef = useRef('');
+  const selectedTrackRef = useRef(FALLBACK_TRACK);
+  const screenReadyRef = useRef(false);
+  const startupRecommendationRefreshRef = useRef(false);
+  const seenRecommendationKeysRef = useRef([]);
+  const spotifyEnsureInFlightRef = useRef(false);
 
-  const isCompact = height < 760;
-  const wheelSize = Math.min(width * (isCompact ? 0.48 : 0.53), isCompact ? 194 : 224);
-  const albumInset = Math.max(7, wheelSize * 0.035);
-  const sideInset = Math.max(22, width * 0.055);
-  const isAutoPlayVisibleOn = autoPlayModeEnabled && hasBackgroundPermission;
-  const contextTop = isCompact ? 104 : 118;
-  const heroTop = contextTop + (isCompact ? 56 : 70);
-  const dotsTop = heroTop + wheelSize + (isCompact ? 17 : 22);
-  const trackTop = dotsTop + (isCompact ? 30 : 40);
-  const tileHeight = isCompact ? 76 : 92;
-  const nowPlayingHeight = isCompact ? 64 : 74;
-  const nowPlayingBottom = isActionPanelOpen ? (isCompact ? 0 : 2) : 10;
-  const nowPlayingTop = height - nowPlayingHeight - nowPlayingBottom;
-  const closeSize = isCompact ? 44 : 50;
-  const closeGap = isCompact ? 4 : 6;
-  const panelPaddingY = isCompact ? 12 : 16;
-  const panelHeight = tileHeight + panelPaddingY * 2;
-  const panelTop = Math.max(
-    trackTop + (isCompact ? 74 : 92),
-    nowPlayingTop - closeSize - closeGap - panelHeight
-  );
-  const closeTop = nowPlayingTop - closeSize - closeGap;
-  const selectedTrack = RECOMMENDED_TRACKS[selectedTrackIndex] || FALLBACK_TRACK;
-  const albumArtworkUrl = artworkByTrackId[selectedTrack.id] || '';
+  const isTiny = height < 740;
+  const isCompact = height < 820;
+  const sideInset = Math.max(18, width * 0.055);
+  const wheelSize = Math.min(width * (isTiny ? 0.43 : isCompact ? 0.49 : 0.54), isTiny ? 178 : isCompact ? 216 : 262);
+  const albumInset = Math.max(6, wheelSize * 0.024);
+  const selectedTrack = recommendationSlots[selectedTrackIndex] || FALLBACK_TRACK;
+  const wheelImageSource = selectedTrack.isChallenge
+    ? CHALLENGE_MARK
+    : buildArtworkSource(selectedTrack.artworkUrl);
   const titleFontSize = fitTitleSize(selectedTrack.title, isCompact);
+  const isAutoPlayVisibleOn = autoPlayModeEnabled && hasBackgroundPermission;
 
-  const moveRecommendation = (offset) => {
+  const recommendationContext = useMemo(() => (
+    buildListeningContext({
+      location,
+      weather,
+      place: placeName ? { name: placeName } : null,
+    })
+  ), [location, placeName, weather]);
+
+  const weatherLabel = useMemo(() => {
+    if (weather) {
+      const mood = getWeatherMoodLabel(weather.condition);
+      return mood.includes('비') ? `비 오는 ${getTimeWord()}` : `${mood} ${getTimeWord()}`;
+    }
+    return hasForegroundPermission ? '날씨 확인 중' : '날씨 권한 필요';
+  }, [hasForegroundPermission, weather]);
+  const weatherIcon = useMemo(() => getWeatherIcon(weather?.condition), [weather?.condition]);
+
+  const placeLabel = placeName
+    ? placeName
+    : isLocating
+      ? '장소 확인 중'
+      : hasForegroundPermission
+        ? '현재 위치'
+        : '위치 권한 필요';
+
+  const recommendationCaption = getRecommendationCaption(selectedTrack.slotType);
+  const recommendationLabel = selectedTrack.sourceLabel || recommendationCaption;
+  const selectedTrackKey = getTrackKey(selectedTrack);
+  const isSelectedTrackLiked = Boolean(selectedTrackKey && likedTrackId === selectedTrackKey);
+  const locationKey = location
+    ? `${Number(location.latitude).toFixed(4)},${Number(location.longitude).toFixed(4)}`
+    : '';
+  const recommendationLocation = useMemo(() => {
+    if (!locationKey) return null;
+    const [latitude, longitude] = locationKey.split(',').map(Number);
+    return { latitude, longitude };
+  }, [locationKey]);
+
+  const moveRecommendation = useCallback((offset) => {
     setSelectedTrackIndex((prev) => {
+      if (recommendationSlots.length <= 0) return 0;
       const next = prev + offset;
-      if (next < 0) return RECOMMENDED_TRACKS.length - 1;
-      if (next >= RECOMMENDED_TRACKS.length) return 0;
+      if (next < 0) return recommendationSlots.length - 1;
+      if (next >= recommendationSlots.length) return 0;
       return next;
     });
-  };
+  }, [recommendationSlots.length]);
 
   const wheelPanResponder = useMemo(() => PanResponder.create({
     onMoveShouldSetPanResponder: (_, gestureState) => (
@@ -191,49 +335,219 @@ export default function HomeScreen({ navigation }) {
         moveRecommendation(-1);
       }
     },
-  }), []);
+  }), [moveRecommendation]);
 
   useEffect(() => {
     const interval = setInterval(() => setTimeLabel(formatTimeLabel()), 30000);
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    let mounted = true;
-
-    Promise.all(
-      RECOMMENDED_TRACKS.map(async (track) => {
-        try {
-          const encodedUrl = encodeURIComponent(track.spotifyUrl);
-          const response = await fetch(`https://open.spotify.com/oembed?url=${encodedUrl}`);
-          const payload = response.ok ? await response.json() : null;
-          return [track.id, payload?.thumbnail_url || ''];
-        } catch (error) {
-          return [track.id, ''];
+  const rememberRecommendationSlots = useCallback((slots = []) => {
+    const nextKeys = [...seenRecommendationKeysRef.current];
+    slots
+      .filter((slot) => slot && !slot.isChallenge && slot.slotType !== 'challenge')
+      .flatMap(getTrackExcludeKeys)
+      .forEach((key) => {
+        if (!nextKeys.includes(key)) {
+          nextKeys.push(key);
         }
-      })
-    ).then((entries) => {
-      if (mounted) {
-        setArtworkByTrackId(Object.fromEntries(entries.filter(([, artworkUrl]) => artworkUrl)));
-      }
-    });
+      });
 
-    return () => {
-      mounted = false;
-    };
+    seenRecommendationKeysRef.current = nextKeys.slice(-32);
   }, []);
 
-  const weatherLabel = useMemo(() => {
-    if (weather) {
-      const mood = getWeatherMoodLabel(weather.condition);
-      return mood.includes('비') ? '비 오는 밤' : `${mood} 밤`;
-    }
-    return hasForegroundPermission ? '날씨 확인 중' : '비 오는 밤';
-  }, [hasForegroundPermission, weather]);
+  const getRefreshExcludeKeys = useCallback(() => {
+    return Array.from(new Set([
+      ...getTrackExcludeKeys(selectedTrackRef.current),
+      ...seenRecommendationKeysRef.current,
+    ]));
+  }, []);
 
-  const placeLabel = weather?.city ? `${weather.city} 카페` : '성수동 카페';
+  const refreshRecommendations = useCallback(async ({
+    force = false,
+    showLoading = false,
+    advance = false,
+    refreshSeed = null,
+    allowSpotifyPrompt = true,
+  } = {}) => {
+    if (recommendationRefreshInFlightRef.current) {
+      return;
+    }
+
+    recommendationRefreshInFlightRef.current = true;
+    if (showLoading) {
+      setIsLoadingRecommendations(true);
+    }
+    try {
+      let slots = await getRecommendationSlots({
+        userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
+        location: recommendationLocation,
+        weather,
+        place: placeName ? { name: placeName } : null,
+        force,
+        excludeTrackKeys: advance ? getRefreshExcludeKeys() : [],
+        refreshSeed: refreshSeed ?? (force ? Date.now() : 0),
+      });
+
+      let playableSlots = Array.isArray(slots)
+        ? slots.filter(isPlayableRecommendationSlot)
+        : [];
+
+      if (playableSlots.length < 4 && allowSpotifyPrompt) {
+        await requestAuthorization({ forcePrompt: true });
+        await prepareAutoPlay(null).catch(() => {});
+        slots = await getRecommendationSlots({
+          userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
+          location: recommendationLocation,
+          weather,
+          place: placeName ? { name: placeName } : null,
+          force: true,
+          excludeTrackKeys: advance ? getRefreshExcludeKeys() : [],
+          refreshSeed: Date.now(),
+        });
+        playableSlots = Array.isArray(slots)
+          ? slots.filter(isPlayableRecommendationSlot)
+          : [];
+      }
+
+      const validSlots = Array.isArray(slots)
+        ? slots.filter(Boolean)
+        : [];
+      if (playableSlots.length >= 4 && validSlots.length > 0) {
+        rememberRecommendationSlots(slots);
+        setRecommendationSlots(slots);
+        if (advance) {
+          if (playableSlots.length > 0) {
+            const currentKey = selectedTrackKeyRef.current;
+            const currentIndex = playableSlots.findIndex((slot) => getTrackKey(slot) === currentKey);
+            const nextPlayable = playableSlots[(Math.max(currentIndex, 0) + 1) % playableSlots.length] || playableSlots[0];
+            const nextIndex = slots.findIndex((slot) => getTrackKey(slot) === getTrackKey(nextPlayable));
+            setSelectedTrackIndex(nextIndex >= 0 ? nextIndex : 0);
+          }
+        }
+      } else {
+        Alert.alert('Spotify 연결 필요', '추천곡과 앨범표지를 가져오려면 Spotify 권한을 다시 확인해주세요.');
+      }
+    } catch (error) {
+      if (showLoading) {
+        Alert.alert(
+          'Spotify 연결 필요',
+          error.message || '추천곡과 앨범표지를 가져오려면 Spotify 권한을 다시 확인해주세요.'
+        );
+      }
+    } finally {
+      recommendationRefreshInFlightRef.current = false;
+      if (showLoading) {
+        setIsLoadingRecommendations(false);
+      }
+    }
+  }, [
+    authUser?.isAnonymous,
+    authUser?.uid,
+    getRefreshExcludeKeys,
+    placeName,
+    prepareAutoPlay,
+    recommendationLocation,
+    rememberRecommendationSlots,
+    requestAuthorization,
+    weather,
+  ]);
+
+  const shouldAskToOpenSpotify = useCallback((state = playerStatus) => {
+    const status = state?.playbackStatus || 'idle';
+    if (state?.isPlaying) {
+      return false;
+    }
+    if ([
+      'playing',
+      'paused',
+      'openedSpotify',
+      'loading',
+      'preparingAutoPlay',
+      'appRemoteOpeningSpotify',
+      'appRemoteAwaitingSpotify',
+      'appRemoteAuthorized',
+      'appRemoteConnected',
+    ].includes(status)) {
+      return false;
+    }
+    return true;
+  }, [playerStatus]);
+
+  const ensureSpotifyRunningAndRefresh = useCallback(async ({
+    enableAutoPlayMode = false,
+    showLoading = true,
+  } = {}) => {
+    if (spotifyEnsureInFlightRef.current) {
+      return;
+    }
+
+    spotifyEnsureInFlightRef.current = true;
+    try {
+      const state = await getState().catch(() => null);
+
+      if (enableAutoPlayMode) {
+        await prepareAutoPlayMode();
+      } else if (shouldAskToOpenSpotify(state)) {
+        await prepareAutoPlay(null).catch(() => {});
+      }
+
+      await clearRecommendationCache();
+      await refreshRecommendations({ force: true, showLoading, refreshSeed: Date.now() });
+    } finally {
+      spotifyEnsureInFlightRef.current = false;
+    }
+  }, [
+    getState,
+    prepareAutoPlay,
+    prepareAutoPlayMode,
+    refreshRecommendations,
+    shouldAskToOpenSpotify,
+  ]);
+
+  useEffect(() => {
+    screenReadyRef.current = true;
+    if (startupRecommendationRefreshRef.current) {
+      return undefined;
+    }
+
+    startupRecommendationRefreshRef.current = true;
+    clearRecommendationCache()
+      .then(() => refreshRecommendations({ force: true, showLoading: true, refreshSeed: Date.now() }))
+      .catch(() => {
+        setIsLoadingRecommendations(false);
+      });
+    return undefined;
+  }, [refreshRecommendations]);
+
+  useEffect(() => {
+    if (selectedTrackIndex < 0 || selectedTrackIndex >= recommendationSlots.length) {
+      setSelectedTrackIndex(0);
+    }
+  }, [recommendationSlots.length, selectedTrackIndex]);
+
+  useEffect(() => {
+    setLikeFeedback('');
+    selectedTrackKeyRef.current = selectedTrackKey;
+    selectedTrackRef.current = selectedTrack;
+  }, [selectedTrack, selectedTrackKey]);
 
   const handlePlay = async () => {
+    if (selectedTrack.isPending || selectedTrack.isActionRequired) {
+      await refreshRecommendations({
+        force: true,
+        showLoading: true,
+        refreshSeed: Date.now(),
+        allowSpotifyPrompt: true,
+      });
+      return;
+    }
+
+    if (selectedTrack.isChallenge) {
+      setIsChallengeOpen(true);
+      return;
+    }
+
     if (!hasForegroundPermission) {
       try {
         await requestPermissions();
@@ -242,25 +556,97 @@ export default function HomeScreen({ navigation }) {
       }
     }
 
-    const orderedQueue = RECOMMENDED_TRACKS
-      .slice(selectedTrackIndex)
-      .concat(RECOMMENDED_TRACKS.slice(0, selectedTrackIndex));
+    const playableSlots = recommendationSlots.filter((track) => !track.isPending && !track.isChallenge);
+    const playableIndex = playableSlots.findIndex((track) => track.id === selectedTrack.id);
+    const queueStartIndex = playableIndex >= 0 ? playableIndex : 0;
+    const orderedQueue = playableSlots
+      .slice(queueStartIndex)
+      .concat(playableSlots.slice(0, queueStartIndex));
 
     try {
+      const state = await getState().catch(() => null);
+      if (shouldAskToOpenSpotify(state)) {
+        await prepareAutoPlay(selectedTrack).catch(() => {});
+      }
       await play(selectedTrack, orderedQueue);
+      await recordListeningEvent({
+        userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
+        track: selectedTrack,
+        source: 'recommendation',
+        recommendationSlot: selectedTrack.slotType || selectedTrack.source || '',
+        context: recommendationContext,
+      }).catch(() => {});
     } catch (error) {
       Alert.alert('Spotify 재생 실패', error.message || 'Spotify로 곡을 열지 못했습니다.');
     }
   };
 
+  const handleChallengeSubmit = async (challenge) => {
+    try {
+      const challengeTrack = await getChallengeRecommendation({
+        userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
+        location,
+        weather,
+        challenge,
+      });
+      const nextTrack = {
+        ...challengeTrack,
+        isChallenge: false,
+        slotType: 'challenge',
+        source: 'challenge',
+        sourceLabel: '오늘은 어떤 곡에 도전해볼까요?',
+        color: '#B99BFF',
+      };
+      setIsChallengeOpen(false);
+      await play(nextTrack, [nextTrack]);
+      await recordListeningEvent({
+        userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
+        track: nextTrack,
+        source: 'challenge',
+        recommendationSlot: 'challenge',
+        context: recommendationContext,
+        challenge,
+      }).catch(() => {});
+    } catch (error) {
+      Alert.alert('Challenge 추천 실패', error.message || '선택한 조합으로 추천을 만들지 못했습니다.');
+    }
+  };
+
   const handleAction = (action) => {
+    if (action.key === 'like') {
+      if (selectedTrack.isPending || selectedTrack.isActionRequired) {
+        return;
+      }
+
+      if (selectedTrack.isChallenge) {
+        setIsChallengeOpen(true);
+        return;
+      }
+
+      setLikedTrackId(selectedTrackKey);
+      setLikeFeedback('비슷한 순간에 더 자주 추천할게요.');
+      recordListeningEvent({
+        userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
+        track: selectedTrack,
+        eventType: 'like',
+        source: 'moment-action-like',
+        recommendationSlot: selectedTrack.slotType || selectedTrack.source || '',
+        context: recommendationContext,
+      })
+        .then(() => clearRecommendationCache())
+        .catch(() => {
+          setLikeFeedback('좋아요 저장에 실패했습니다.');
+        });
+      return;
+    }
+
     if (action.screen) {
       navigation.navigate(action.screen);
     }
   };
 
-  const handleWheelLongPress = () => {
-    setIsActionPanelOpen(true);
+  const handleRefreshRecommendationPress = async () => {
+    await refreshRecommendations({ force: true, showLoading: true, advance: true });
   };
 
   const handleToggleAutoPlayMode = () => {
@@ -271,144 +657,152 @@ export default function HomeScreen({ navigation }) {
       return;
     }
 
-    Alert.alert(
-      '자동재생 모드 ON',
-      '자동재생을 사용하기 위해 Spotify를 실행합니다.',
-      [
-        { text: '취소', style: 'cancel' },
-        {
-          text: '실행',
-          onPress: async () => {
-            try {
-              await prepareAutoPlayMode();
-            } catch (error) {
-              Alert.alert('Spotify 실행 실패', error.message || 'Spotify를 실행하지 못했습니다.');
-            }
-          },
-        },
-      ]
-    );
+    ensureSpotifyRunningAndRefresh({ enableAutoPlayMode: true, showLoading: true }).catch((error) => {
+      Alert.alert('자동재생 설정 실패', error.message || 'Spotify 실행 또는 자동재생 설정에 실패했습니다.');
+    });
   };
 
   return (
     <View style={styles.container}>
       <View style={styles.backdrop} />
       <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
-        <View style={[styles.topBar, { paddingHorizontal: sideInset }]}>
-          <Text style={styles.logo}>NOWHERE</Text>
-          <TouchableOpacity
-            style={[styles.autoPlayToggle, isAutoPlayVisibleOn && styles.autoPlayToggleActive]}
-            activeOpacity={0.82}
-            onPress={handleToggleAutoPlayMode}
-          >
-            <Text style={[styles.autoPlayToggleText, isAutoPlayVisibleOn && styles.autoPlayToggleTextActive]}>
-              {isAutoPlayVisibleOn ? 'AUTO ON' : 'AUTO OFF'}
+        <View style={[styles.screenContent, { paddingHorizontal: sideInset }]}>
+          <View style={styles.topBar}>
+            <Text style={[styles.logo, isCompact && styles.logoCompact]}>NOWHERE</Text>
+            <TouchableOpacity
+              style={[styles.autoPlayToggle, isAutoPlayVisibleOn && styles.autoPlayToggleActive]}
+              activeOpacity={0.82}
+              onPress={handleToggleAutoPlayMode}
+            >
+              <View style={[styles.autoPlayDot, isAutoPlayVisibleOn && styles.autoPlayDotActive]} />
+              <Text style={[styles.autoPlayToggleText, isAutoPlayVisibleOn && styles.autoPlayToggleTextActive]}>
+                {isAutoPlayVisibleOn ? 'AUTO ON' : 'AUTO OFF'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.contextRow}>
+            <ContextChip icon="location-outline" label={placeLabel} compact={isCompact} />
+            <ContextChip icon="time-outline" label={timeLabel} compact={isCompact} />
+            <ContextChip icon={weatherIcon} label={weatherLabel} compact={isCompact} />
+          </View>
+
+          {locationError ? (
+            <Text style={styles.locationWarning} numberOfLines={1}>{locationError}</Text>
+          ) : null}
+
+          <View style={styles.sectionCaptionRow}>
+            <View style={styles.sectionAccent} />
+            <Text style={styles.sectionCaption}>{recommendationCaption}</Text>
+          </View>
+
+          <View style={styles.heroWrap}>
+            <TouchableOpacity style={styles.arrowButton} activeOpacity={0.8} onPress={() => moveRecommendation(-1)}>
+              <Ionicons name="chevron-back-outline" size={32} color={UI.peach} />
+            </TouchableOpacity>
+
+            <View style={styles.wheelFrame}>
+              <TouchableOpacity
+                {...wheelPanResponder.panHandlers}
+                activeOpacity={0.9}
+                onPress={handlePlay}
+                style={[
+                  styles.wheelOuter,
+                  {
+                    width: wheelSize,
+                    height: wheelSize,
+                    borderRadius: wheelSize / 2,
+                  },
+                ]}
+              >
+                <Image
+                  source={wheelImageSource}
+                  resizeMode="cover"
+                  style={[
+                    styles.wheelImage,
+                    selectedTrack.isChallenge && styles.challengeWheelImage,
+                    {
+                      width: wheelSize - albumInset * 2,
+                      height: wheelSize - albumInset * 2,
+                      borderRadius: (wheelSize - albumInset * 2) / 2,
+                    },
+                  ]}
+                />
+                {selectedTrack.isChallenge ? null : <View style={styles.wheelGlass} />}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.wheelRefreshButton}
+                activeOpacity={0.82}
+                onPress={handleRefreshRecommendationPress}
+              >
+                <Ionicons name="refresh-outline" size={19} color={UI.peach} />
+              </TouchableOpacity>
+            </View>
+
+            <TouchableOpacity style={styles.arrowButton} activeOpacity={0.8} onPress={() => moveRecommendation(1)}>
+              <Ionicons name="chevron-forward-outline" size={32} color={UI.peach} />
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.pageDots}>
+            {recommendationSlots.map((track, index) => (
+              <View key={track.id} style={[styles.dot, index === selectedTrackIndex && styles.dotActive]} />
+            ))}
+          </View>
+
+          <View style={styles.trackBlock}>
+            <Text style={styles.recommendationLabel} numberOfLines={1}>
+              {recommendationLabel}
             </Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={[styles.contextRow, { top: contextTop }]}>
-          <ContextChip icon="location-outline" label={placeLabel} compact={isCompact} />
-          <ContextChip icon="time-outline" label={timeLabel} compact={isCompact} />
-          <ContextChip icon="rainy-outline" label={weatherLabel} compact={isCompact} />
-        </View>
-
-        {locationError ? (
-          <Text style={styles.locationWarning} numberOfLines={1}>{locationError}</Text>
-        ) : null}
-
-        <View style={[styles.heroWrap, { top: heroTop }]}>
-          <TouchableOpacity style={styles.arrowButton} activeOpacity={0.8} onPress={() => moveRecommendation(-1)}>
-            <Ionicons name="chevron-back-outline" size={38} color="#FFD2C9" />
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            {...wheelPanResponder.panHandlers}
-            activeOpacity={0.88}
-            onPress={handlePlay}
-            onLongPress={handleWheelLongPress}
-            delayLongPress={420}
-            style={[
-              styles.wheelOuter,
-              {
-                width: wheelSize,
-                height: wheelSize,
-                borderRadius: wheelSize / 2,
-              },
-            ]}
-          >
-            <Image
-              source={albumArtworkUrl ? { uri: albumArtworkUrl } : EMPTY_MARK}
-              style={[
-                styles.wheelImage,
-                {
-                  width: wheelSize - albumInset * 2,
-                  height: wheelSize - albumInset * 2,
-                  borderRadius: (wheelSize - albumInset * 2) / 2,
-                },
-              ]}
-              resizeMode="cover"
-            />
-            <View style={styles.wheelGlowDot} />
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.arrowButton} activeOpacity={0.8} onPress={() => moveRecommendation(1)}>
-            <Ionicons name="chevron-forward-outline" size={38} color="#FFD2C9" />
-          </TouchableOpacity>
-        </View>
-
-        <View style={[styles.pageDots, { top: dotsTop }]}>
-          {RECOMMENDED_TRACKS.map((track, index) => (
-            <View key={track.id} style={[styles.dot, index === selectedTrackIndex && styles.dotActive]} />
-          ))}
-        </View>
-
-        <View style={[styles.trackBlock, { top: trackTop }]}>
-          <View style={styles.titleRow}>
-            <Text style={[styles.trackTitle, { fontSize: titleFontSize }]} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.74}>
+            <Text
+              style={[styles.trackTitle, { fontSize: titleFontSize }]}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.68}
+            >
               {selectedTrack.title}
             </Text>
+            <Text style={styles.trackArtist} numberOfLines={1}>{selectedTrack.artist}</Text>
+            <Text style={styles.tapHint}>
+              {selectedTrack.isActionRequired
+                ? '원을 탭하여 Spotify 연결 확인'
+                : isLoadingRecommendations
+                  ? 'Spotify 추천을 불러오는 중'
+                  : '원을 탭하여 듣기'}
+            </Text>
           </View>
-          <Text style={styles.trackMeta}>{selectedTrack.artist}</Text>
-          <Text style={[styles.recommendReason, isCompact && styles.recommendReasonCompact]}>{selectedTrack.reason}</Text>
-          <TouchableOpacity style={styles.playHint} activeOpacity={0.8} onPress={handlePlay} disabled={isLocating}>
-            <Ionicons name="link-outline" size={22} color="#B9AAA7" />
-            <Text style={styles.playHintText}>{isLocating ? '위치 확인 중' : '원을 탭하여 재생'}</Text>
-          </TouchableOpacity>
-        </View>
 
-        {isActionPanelOpen ? (
-          <View style={[styles.actionsPanel, { top: panelTop, paddingVertical: panelPaddingY }]}>
+          <View style={styles.actionsPanel}>
+            <View style={styles.actionsTitleRow}>
+              <Text style={styles.actionsEyebrow}>M O M E N T   A C T I O N S</Text>
+              <View style={styles.actionsLine} />
+            </View>
             <View style={styles.actionsRow}>
               {FEATURE_ACTIONS.map((action) => (
                 <ActionTile
                   key={action.key}
                   action={action}
                   onPress={() => handleAction(action)}
-                  tileHeight={tileHeight}
                   compact={isCompact}
+                  active={action.key === 'like' && isSelectedTrackLiked}
+                  disabled={action.key === 'like' && (isLoadingRecommendations || selectedTrack.isActionRequired)}
                 />
               ))}
             </View>
+            {likeFeedback ? <Text style={styles.likeFeedback}>{likeFeedback}</Text> : null}
           </View>
-        ) : null}
 
-        {isActionPanelOpen ? (
-          <TouchableOpacity
-            style={[styles.closeButton, { top: closeTop, width: closeSize, height: closeSize, borderRadius: closeSize / 2, marginLeft: -closeSize / 2 }]}
-            activeOpacity={0.8}
-            onPress={() => setIsActionPanelOpen(false)}
-          >
-            <Ionicons name="close-outline" size={42} color="#FFD2C9" />
-          </TouchableOpacity>
-        ) : null}
+          <NowPlayingCard
+            currentTrack={currentTrack || (selectedTrack.isPending || selectedTrack.isActionRequired ? null : selectedTrack)}
+            playerStatus={playerStatus}
+            compact={isCompact}
+          />
+        </View>
 
-        <NowPlayingPill
-          currentTrack={currentTrack}
-          playerStatus={playerStatus}
-          height={nowPlayingHeight}
-          bottom={nowPlayingBottom}
-          compact={isCompact}
+        <ChallengePanel
+          visible={isChallengeOpen}
+          onClose={() => setIsChallengeOpen(false)}
+          onSubmit={handleChallengeSubmit}
         />
       </SafeAreaView>
     </View>
@@ -416,300 +810,336 @@ export default function HomeScreen({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#080808' },
+  container: { flex: 1, backgroundColor: UI.bg },
   backdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#07080A',
+    backgroundColor: UI.bg,
   },
   safeArea: {
     flex: 1,
+  },
+  screenContent: {
+    flex: 1,
     paddingTop: 18,
-    paddingBottom: 10,
-    position: 'relative',
+    paddingBottom: 12,
   },
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 18,
   },
   logo: {
-    color: '#FFD2C9',
-    fontSize: 22,
+    color: UI.text,
+    fontSize: 23,
     fontWeight: '300',
+    letterSpacing: 10,
+  },
+  logoCompact: {
+    fontSize: 20,
     letterSpacing: 8,
   },
   autoPlayToggle: {
-    minWidth: 76,
-    height: 36,
-    paddingHorizontal: 12,
-    borderRadius: 18,
+    minWidth: 90,
+    height: 34,
+    paddingHorizontal: 11,
+    borderRadius: 17,
     borderWidth: 1,
-    borderColor: 'rgba(255, 210, 201, 0.45)',
-    backgroundColor: 'rgba(39, 32, 33, 0.72)',
+    borderColor: 'rgba(255, 201, 184, 0.38)',
+    backgroundColor: 'rgba(31, 29, 29, 0.74)',
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: 8,
   },
   autoPlayToggleActive: {
-    borderColor: '#31D97C',
-    backgroundColor: 'rgba(49, 217, 124, 0.22)',
+    borderColor: 'rgba(110, 232, 154, 0.35)',
+    backgroundColor: 'rgba(33, 56, 39, 0.52)',
+  },
+  autoPlayDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: 'rgba(255, 201, 184, 0.7)',
+  },
+  autoPlayDotActive: {
+    backgroundColor: UI.green,
   },
   autoPlayToggleText: {
-    color: '#FFD2C9',
+    color: UI.peach,
     fontSize: 11,
     fontWeight: '800',
   },
   autoPlayToggleTextActive: {
-    color: '#6CFFA6',
+    color: UI.green,
   },
   contextRow: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
     flexDirection: 'row',
-    justifyContent: 'center',
+    justifyContent: 'space-between',
     gap: 8,
-    paddingHorizontal: 12,
+    marginTop: 18,
   },
   contextChip: {
     flex: 1,
-    maxWidth: 122,
-    height: 40,
-    paddingHorizontal: 10,
-    borderRadius: 20,
+    minWidth: 0,
+    height: 34,
+    paddingHorizontal: 7,
+    borderRadius: 17,
     borderWidth: 1,
-    borderColor: 'rgba(255, 168, 158, 0.58)',
-    backgroundColor: 'rgba(45, 35, 34, 0.58)',
+    borderColor: UI.border,
+    backgroundColor: 'rgba(38, 33, 31, 0.72)',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 5,
   },
   contextChipText: {
-    color: '#F9D8D1',
-    fontSize: 13,
-    fontWeight: '500',
+    color: UI.text,
+    fontSize: 12,
+    fontWeight: '600',
     flexShrink: 1,
+    minWidth: 0,
   },
   contextChipTextCompact: {
-    fontSize: 12,
+    fontSize: 11,
   },
   locationWarning: {
-    position: 'absolute',
-    top: 151,
-    left: 0,
-    right: 0,
-    color: '#FFB4A9',
-    fontSize: 12,
+    color: UI.peachStrong,
+    fontSize: 10,
     textAlign: 'center',
-    paddingHorizontal: 24,
-  },
-  heroWrap: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 22,
-  },
-  arrowButton: {
-    width: 44,
-    height: 60,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  wheelOuter: {
-    borderWidth: 2,
-    borderColor: '#FF8E89',
-    backgroundColor: 'rgba(26, 22, 23, 0.94)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-    shadowColor: '#FF8E89',
-    shadowOpacity: 0.65,
-    shadowRadius: 22,
-    shadowOffset: { width: 0, height: 0 },
-    elevation: 10,
-  },
-  wheelImage: {
-    opacity: 1,
-  },
-  wheelGlowDot: {
-    position: 'absolute',
-    right: 17,
-    top: 49,
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: '#FF928C',
-    shadowColor: '#FF8E89',
-    shadowOpacity: 0.9,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  pageDots: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 18,
-  },
-  dot: {
-    width: 13,
-    height: 13,
-    borderRadius: 7,
-    backgroundColor: 'rgba(255, 255, 255, 0.22)',
-  },
-  dotActive: {
-    backgroundColor: '#FFAAA1',
-  },
-  trackBlock: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-  },
-  titleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 18,
-  },
-  trackTitle: {
-    color: '#FFE7E2',
-    fontSize: 30,
-    fontWeight: '300',
-    letterSpacing: 0,
-    textShadowColor: 'rgba(255, 174, 162, 0.45)',
-    textShadowRadius: 10,
-  },
-  trackMeta: {
-    color: '#EAD0CB',
-    fontSize: 15,
     marginTop: 6,
   },
-  recommendReason: {
-    color: '#FF9186',
-    fontSize: 15,
-    marginTop: 16,
-  },
-  recommendReasonCompact: {
-    fontSize: 15,
-    marginTop: 14,
-  },
-  playHint: {
+  sectionCaptionRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginTop: 20,
+    marginTop: 16,
   },
-  playHintText: {
-    color: '#B9AAA7',
-    fontSize: 14,
+  sectionAccent: {
+    width: 3,
+    height: 21,
+    borderRadius: 2,
+    backgroundColor: UI.peach,
+  },
+  sectionCaption: {
+    color: UI.textSoft,
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  heroWrap: {
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  wheelFrame: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  arrowButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.24)',
+    backgroundColor: 'rgba(54, 44, 39, 0.7)',
+  },
+  wheelOuter: {
+    borderWidth: 2,
+    borderColor: 'rgba(255, 215, 204, 0.7)',
+    backgroundColor: 'rgba(31, 29, 29, 0.88)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    shadowColor: UI.peach,
+    shadowOpacity: 0.42,
+    shadowRadius: 32,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 12,
+  },
+  wheelImage: {
+    opacity: 0.92,
+  },
+  challengeWheelImage: {
+    opacity: 1,
+  },
+  wheelGlass: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 999,
+    borderWidth: 9,
+    borderColor: 'rgba(255, 255, 255, 0.08)',
+    backgroundColor: 'rgba(255,255,255,0.02)',
+  },
+  wheelRefreshButton: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.38)',
+    backgroundColor: 'rgba(17, 17, 18, 0.78)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pageDots: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 18,
+    marginTop: 13,
+  },
+  dot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
+  },
+  dotActive: {
+    backgroundColor: UI.peach,
+  },
+  trackBlock: {
+    alignItems: 'center',
+    marginTop: 13,
+  },
+  recommendationLabel: {
+    color: UI.peach,
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 7,
+  },
+  trackTitle: {
+    maxWidth: '100%',
+    color: '#FFFFFF',
+    fontWeight: '700',
+    letterSpacing: 0,
+    textAlign: 'center',
+  },
+  trackArtist: {
+    color: UI.textMuted,
+    fontSize: 15,
+    marginTop: 5,
+    fontWeight: '500',
+  },
+  tapHint: {
+    marginTop: 7,
+    color: UI.textMuted,
+    fontSize: 11,
   },
   actionsPanel: {
-    position: 'absolute',
-    left: 14,
-    right: 14,
-    paddingHorizontal: 12,
-    borderRadius: 26,
+    marginTop: 'auto',
+    borderRadius: 20,
     borderWidth: 1,
-    borderColor: 'rgba(255, 160, 150, 0.66)',
-    backgroundColor: 'rgba(39, 29, 30, 0.70)',
-    shadowColor: '#FF8D84',
-    shadowOpacity: 0.3,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: -2 },
+    borderColor: 'rgba(255, 201, 184, 0.22)',
+    backgroundColor: 'rgba(20, 20, 20, 0.72)',
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+  },
+  actionsTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginHorizontal: 7,
+    marginBottom: 9,
+  },
+  actionsEyebrow: {
+    color: UI.peach,
+    fontSize: 8,
+    letterSpacing: 4,
+    fontWeight: '700',
+  },
+  actionsLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: 'rgba(255, 201, 184, 0.22)',
   },
   actionsRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 9,
+    gap: 7,
   },
   actionTile: {
     flex: 1,
-    borderRadius: 20,
+    minHeight: 66,
+    borderRadius: 15,
     borderWidth: 1,
-    borderColor: 'rgba(255, 160, 150, 0.38)',
-    backgroundColor: 'rgba(31, 28, 29, 0.73)',
+    borderColor: 'rgba(255, 201, 184, 0.28)',
+    backgroundColor: 'rgba(47, 43, 40, 0.78)',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 12,
+    gap: 5,
+    paddingHorizontal: 4,
+  },
+  actionTileActive: {
+    borderColor: 'rgba(110, 232, 154, 0.48)',
+    backgroundColor: 'rgba(34, 58, 41, 0.72)',
+  },
+  actionTileDisabled: {
+    opacity: 0.62,
   },
   actionLabel: {
-    minHeight: 42,
-    color: '#FFE5DF',
-    fontSize: 15,
-    lineHeight: 20,
+    color: UI.text,
+    fontSize: 11,
+    lineHeight: 14,
     textAlign: 'center',
-    fontWeight: '400',
+    fontWeight: '600',
   },
   actionLabelCompact: {
-    minHeight: 34,
-    fontSize: 14,
-    lineHeight: 19,
+    fontSize: 10,
+    lineHeight: 13,
   },
-  closeButton: {
-    position: 'absolute',
-    left: '50%',
-    marginLeft: -35,
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 160, 150, 0.56)',
-    backgroundColor: 'rgba(43, 33, 33, 0.88)',
-    alignItems: 'center',
-    justifyContent: 'center',
+  likeFeedback: {
+    color: UI.green,
+    fontSize: 11,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginTop: 8,
   },
-  nowPlayingPill: {
-    position: 'absolute',
-    left: 38,
-    right: 38,
-    bottom: 10,
+  nowPlayingCard: {
+    marginTop: 12,
+    minHeight: 62,
+    borderRadius: 17,
     borderWidth: 1,
-    borderColor: 'rgba(255, 166, 154, 0.75)',
-    backgroundColor: 'rgba(35, 29, 31, 0.82)',
+    borderColor: 'rgba(255, 201, 184, 0.22)',
+    backgroundColor: 'rgba(32, 30, 29, 0.82)',
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 20,
-    gap: 12,
-    shadowColor: '#FF8E89',
-    shadowOpacity: 0.48,
-    shadowRadius: 22,
-    shadowOffset: { width: 0, height: 0 },
+    padding: 10,
+    gap: 10,
+  },
+  nowPlayingArtwork: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+  },
+  nowPlayingArtworkCompact: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
   },
   nowPlayingTextWrap: {
     flex: 1,
-    alignItems: 'center',
+    minWidth: 0,
   },
   nowPlayingEyebrow: {
-    color: '#EAB8B1',
-    fontSize: 11,
-    letterSpacing: 4,
-  },
-  nowPlayingEyebrowCompact: {
-    fontSize: 11,
-    letterSpacing: 4,
+    color: UI.peach,
+    fontSize: 8,
+    letterSpacing: 3,
+    fontWeight: '700',
   },
   nowPlayingTitle: {
-    color: '#FFE2DC',
-    fontSize: 15,
+    color: UI.text,
+    fontSize: 14,
+    fontWeight: '700',
     marginTop: 6,
-    maxWidth: '100%',
   },
   nowPlayingTitleCompact: {
-    fontSize: 15,
-    marginTop: 4,
+    fontSize: 13,
   },
   nowPlayingSub: {
-    color: '#B9AAA7',
-    fontSize: 13,
-    marginTop: 3,
-  },
-  nowPlayingSubCompact: {
+    color: UI.textMuted,
     fontSize: 11,
-    marginTop: 2,
+    marginTop: 3,
   },
 });

@@ -1,11 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { WebView } from 'react-native-webview';
-import { COLORS } from '../constants';
 
 const DEFAULT_COORDS = {
   latitude: 37.5665,
   longitude: 126.978,
+};
+
+const MAP_UI = {
+  surface: 'rgba(22, 22, 22, 0.76)',
+  border: 'rgba(255, 201, 184, 0.22)',
+  borderStrong: 'rgba(255, 201, 184, 0.58)',
+  text: '#FFF1EC',
+  textSoft: '#D8C5BE',
+  textMuted: '#948985',
+  peach: '#FFC8B8',
+  error: '#FF7777',
 };
 
 function hasValidKakaoKey(apiKey) {
@@ -170,7 +180,7 @@ export default function KakaoPlacePicker({
         </View>
       ) : null}
       <TouchableOpacity style={styles.currentButtonFloating} onPress={onMoveToCurrentLocation}>
-        <Text style={styles.currentButtonText}>현재 위치</Text>
+        <Text style={styles.currentFloatingButtonText}>현재 위치</Text>
       </TouchableOpacity>
     </View>
   );
@@ -178,55 +188,55 @@ export default function KakaoPlacePicker({
 
 const styles = StyleSheet.create({
   container: {
-    height: 260,
-    borderRadius: 18,
+    height: 250,
+    borderRadius: 22,
     overflow: 'hidden',
-    backgroundColor: COLORS.surface,
+    backgroundColor: MAP_UI.surface,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: MAP_UI.border,
   },
   webview: {
     flex: 1,
-    backgroundColor: COLORS.surface,
+    backgroundColor: MAP_UI.surface,
   },
   errorOverlay: {
     position: 'absolute',
     left: 12,
     right: 12,
     bottom: 12,
-    borderRadius: 14,
+    borderRadius: 18,
     padding: 12,
     backgroundColor: 'rgba(10,10,10,0.86)',
     borderWidth: 1,
-    borderColor: COLORS.coral + '77',
+    borderColor: 'rgba(255, 119, 119, 0.55)',
   },
   errorTitle: {
-    color: COLORS.coral,
+    color: MAP_UI.error,
     fontSize: 13,
     fontWeight: '800',
     marginBottom: 5,
   },
   errorBody: {
-    color: COLORS.textSub,
+    color: MAP_UI.textSoft,
     fontSize: 11,
     lineHeight: 16,
   },
   fallback: {
     minHeight: 220,
-    borderRadius: 18,
+    borderRadius: 22,
     padding: 18,
-    backgroundColor: COLORS.surface,
+    backgroundColor: MAP_UI.surface,
     borderWidth: 1,
-    borderColor: COLORS.border,
+    borderColor: MAP_UI.border,
     justifyContent: 'center',
   },
   fallbackTitle: {
-    color: COLORS.text,
+    color: MAP_UI.text,
     fontSize: 16,
     fontWeight: '700',
   },
   fallbackText: {
-    color: COLORS.textSub,
+    color: MAP_UI.textSoft,
     fontSize: 13,
     lineHeight: 19,
     marginTop: 10,
@@ -237,7 +247,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: 14,
     paddingVertical: 10,
-    backgroundColor: COLORS.green,
+    backgroundColor: MAP_UI.peach,
   },
   currentButtonFloating: {
     position: 'absolute',
@@ -246,10 +256,17 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: 14,
     paddingVertical: 10,
-    backgroundColor: COLORS.green,
+    backgroundColor: 'rgba(37, 32, 30, 0.88)',
+    borderWidth: 1,
+    borderColor: MAP_UI.borderStrong,
   },
   currentButtonText: {
-    color: '#000',
+    color: '#211817',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  currentFloatingButtonText: {
+    color: MAP_UI.peach,
     fontSize: 12,
     fontWeight: '800',
   },

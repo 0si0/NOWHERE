@@ -84,12 +84,12 @@ export function PlayerProvider({ children }) {
     }
   }, [applyState]);
 
-  const requestAuthorization = useCallback(async () => {
-    const result = await musicPlayerService.requestAuthorization();
+  const requestAuthorization = useCallback(async (options = {}) => {
+    const result = await musicPlayerService.requestAuthorization(options);
     setPlayerState((prev) => ({
       ...prev,
-      authorizationStatus: result.status,
-      isAuthorized: Boolean(result.authorized),
+      authorizationStatus: result.status || result.authorizationStatus,
+      isAuthorized: Boolean(result.authorized || result.isAuthorized),
     }));
     return result;
   }, []);

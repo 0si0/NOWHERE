@@ -26,6 +26,13 @@ function cleanOptionalText(value, label, max = 240) {
   return cleanText(value, label, { max, allowEmpty: true });
 }
 
+function cleanOptionalTextLoose(value, max = 240) {
+  if (value === undefined || value === null || value === '') {
+    return '';
+  }
+  return String(value).trim().slice(0, max);
+}
+
 function cleanLatitude(value) {
   invariant(isNumeric(value), '위도 값이 올바르지 않습니다.');
   invariant(value >= -90 && value <= 90, '위도 범위를 벗어났습니다.');
@@ -119,6 +126,33 @@ function cleanRoutePoints(routePoints = []) {
       recordedAt: cleanOptionalText(point.recordedAt, '경로 기록 시각', 64),
       segmentIndex: Number.isInteger(point.segmentIndex) && point.segmentIndex >= 0 ? point.segmentIndex : 0,
     }));
+}
+
+function cleanRouteSegments(routeSegments = []) {
+  invariant(Array.isArray(routeSegments), '뮤직지도 구간 형식이 올바르지 않습니다.');
+  invariant(routeSegments.length <= 120, '뮤직지도 구간은 최대 120개까지 저장할 수 있습니다.');
+
+  return routeSegments
+    .filter((segment) => segment && typeof segment === 'object')
+    .map((segment, index) => {
+      const startIndex = cleanPositiveInteger(segment.startIndex);
+      const endIndex = Math.max(startIndex, cleanPositiveInteger(segment.endIndex, startIndex));
+      const albumColor = cleanColor(segment.albumColor);
+      return {
+        id: cleanOptionalTextLoose(segment.id, 140) || `segment-${index}`,
+        trackKey: cleanOptionalTextLoose(segment.trackKey, 240),
+        trackId: cleanOptionalTextLoose(segment.trackId, 160),
+        trackName: cleanOptionalTextLoose(segment.trackName, 160),
+        artistName: cleanOptionalTextLoose(segment.artistName, 160),
+        albumName: cleanOptionalTextLoose(segment.albumName, 160),
+        albumArtUrl: cleanOptionalTextLoose(segment.albumArtUrl, 500),
+        albumColor,
+        startIndex,
+        endIndex,
+        startedAt: cleanOptionalTextLoose(segment.startedAt, 64),
+        endedAt: cleanOptionalTextLoose(segment.endedAt, 64),
+      };
+    });
 }
 
 function cleanWeatherRules(weatherRules = []) {
@@ -308,6 +342,7 @@ export function sanitizeMusicMapRecordInput(input) {
       geohash: encodeGeohash(latitude, longitude),
     },
     routePoints: cleanRoutePoints(input.routePoints),
+    routeSegments: cleanRouteSegments(input.routeSegments),
     playedDurationMs: cleanPositiveInteger(input.playedDurationMs),
     startedAt,
     recordedAt,

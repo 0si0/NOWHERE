@@ -28,6 +28,7 @@ import {
   recordCurrentMusicMapPlayback,
   startMusicMapRecordingSession,
   stopMusicMapRecordingSession,
+  subscribeMusicMapRecordingSession,
 } from '../services/musicMapRecordingService';
 import { getCurrentWeather, isWeatherConfigured } from '../services/weatherService';
 import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
@@ -110,6 +111,8 @@ function getMusicMapSessionSignature(session = {}) {
     segment.trackKey || '',
     routePoints.length,
     Array.isArray(session.trackChangeMarkers) ? session.trackChangeMarkers.length : 0,
+    Array.isArray(session.routeSegments) ? session.routeSegments.length : 0,
+    segment.albumColor || '',
     typeof lastPoint.latitude === 'number' ? lastPoint.latitude.toFixed(5) : '',
     typeof lastPoint.longitude === 'number' ? lastPoint.longitude.toFixed(5) : '',
   ].join('|');
@@ -407,6 +410,19 @@ export function LocationProvider({ children }) {
     musicMapRecordingRef.current = musicMapRecording;
     musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(musicMapRecording);
   }, [musicMapRecording]);
+
+  useEffect(() => subscribeMusicMapRecordingSession((session) => {
+    const nextSession = {
+      ...session,
+      maxDurationMs: session.maxDurationMs || 60 * 60 * 1000,
+    };
+    const nextSignature = getMusicMapSessionSignature(nextSession);
+    musicMapRecordingRef.current = nextSession;
+    if (nextSignature !== musicMapRecordingSignatureRef.current) {
+      musicMapRecordingSignatureRef.current = nextSignature;
+      setMusicMapRecording(nextSession);
+    }
+  }), []);
 
   const refreshAutoPlayPlaces = useCallback(async ({ force = false } = {}) => {
     if (isFirebaseConfigured && isSessionLoading) {

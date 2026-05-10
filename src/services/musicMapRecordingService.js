@@ -1,4 +1,10 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  DEFAULT_ALBUM_COLOR,
+  getAlbumArtUrl,
+  getInitialAlbumColor,
+  resolveAlbumColor,
+} from './albumColorService';
 import { saveMusicMapRecord } from './firebaseService';
 import { getDistanceMeters } from './locationService';
 import { musicPlayerService } from './musicPlayerService';
@@ -6,26 +12,23 @@ import { musicPlayerService } from './musicPlayerService';
 const MUSIC_MAP_SESSION_KEY = '@nowhere/music-map-recording-session-v2';
 const MUSIC_MAP_STOPPING_KEY = '@nowhere/music-map-recording-stopping-v2';
 const MUSIC_MAP_SEGMENT_SAVE_PREFIX = '@nowhere/music-map-recording-segment-save-v2:';
-const ROUTE_POINT_MIN_DISTANCE_M = 18;
-const ROUTE_POINT_MAX_COUNT = 160;
+const LOCATION_ACCURACY_THRESHOLD = 30;
+const MIN_DISTANCE_TO_ADD_POINT = 3;
+const MAX_REASONABLE_WALKING_SPEED = 5;
+const GPS_JUMP_DISTANCE_THRESHOLD = 50;
+const GPS_JUMP_TIME_THRESHOLD_MS = 15000;
+const STATIONARY_ACCURACY_FACTOR = 0.35;
+const ROUTE_POINT_MAX_COUNT = 720;
+const SAVED_ROUTE_POINT_MAX_COUNT = 160;
 const MAX_RECORDING_DURATION_MS = 60 * 60 * 1000;
 const MIN_SAVED_ROUTE_POINTS = 1;
 const SPOTIFY_STATE_MIN_POLL_INTERVAL_MS = 10000;
 const SPOTIFY_STATE_MAX_CACHE_AGE_MS = 10 * 60 * 1000;
 const SESSION_IDLE_WRITE_INTERVAL_MS = 15000;
 const PLAYER_CONFIGURE_INTERVAL_MS = 5 * 60 * 1000;
-const DEFAULT_ALBUM_COLORS = [
-  '#FFC8B8',
-  '#7CFFB2',
-  '#A9D6FF',
-  '#FFD166',
-  '#FF8FAB',
-  '#CDB4DB',
-  '#BDE0FE',
-];
-
 let recordInFlight = false;
 let lastPlayerConfiguredAt = 0;
+const sessionListeners = new Set();
 
 function isFiniteCoordinate(value) {
   return typeof value === 'number' && Number.isFinite(value);
@@ -39,6 +42,8 @@ function normalizeCoords(coords) {
   return {
     latitude: coords.latitude,
     longitude: coords.longitude,
+    accuracy: typeof coords.accuracy === 'number' && Number.isFinite(coords.accuracy) ? coords.accuracy : null,
+    speed: typeof coords.speed === 'number' && Number.isFinite(coords.speed) ? coords.speed : null,
   };
 }
 
@@ -52,6 +57,20 @@ function getTrackKey(track = {}) {
   ].filter(Boolean).join(':');
 }
 
+function hashText(text = '') {
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash) + text.charCodeAt(index);
+    hash |= 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function buildRecordId(prefix, track = {}, recordedAt = new Date().toISOString()) {
+  const trackPart = track.id || track.spotifyUri || track.uri || hashText(getTrackKey(track));
+  return `${prefix}:${String(trackPart).slice(0, 48)}:${recordedAt}`;
+}
+
 function hasValidTrack(track = {}) {
   return track &&
     track.type !== 'playlist' &&
@@ -59,42 +78,119 @@ function hasValidTrack(track = {}) {
 }
 
 function getAlbumColor(track = {}) {
-  const givenColor = typeof track.color === 'string' ? track.color.trim() : '';
-  if (/^#[0-9A-Fa-f]{6}$/.test(givenColor)) {
-    return givenColor;
-  }
+  return getInitialAlbumColor(track);
+}
 
-  const text = `${track.title || ''}:${track.artist || ''}:${track.album || ''}`;
-  let hash = 0;
-  for (let index = 0; index < text.length; index += 1) {
-    hash = ((hash << 5) - hash) + text.charCodeAt(index);
-    hash |= 0;
-  }
+function getTrackSummary(track = {}, albumColor = getAlbumColor(track)) {
+  return {
+    trackId: track.trackId || track.id || track.spotifyUri || track.uri || '',
+    trackKey: track.trackKey || getTrackKey(track),
+    trackName: track.trackName || track.title || 'Unknown Track',
+    artistName: track.artistName || track.artist || '',
+    albumName: track.albumName || track.album || '',
+    albumArtUrl: getAlbumArtUrl(track),
+    albumColor: albumColor || DEFAULT_ALBUM_COLOR,
+  };
+}
 
-  return DEFAULT_ALBUM_COLORS[Math.abs(hash) % DEFAULT_ALBUM_COLORS.length] || DEFAULT_ALBUM_COLORS[0];
+function getTrackIdentity(track = {}) {
+  const trackId = track.trackId || track.id || track.spotifyUri || track.uri || '';
+  if (trackId) return `id:${trackId}`;
+  const trackKey = track.trackKey || getTrackKey(track);
+  if (trackKey) return `key:${trackKey}`;
+  const trackName = track.trackName || track.title || '';
+  const artistName = track.artistName || track.artist || '';
+  return `text:${trackName}:${artistName}`.toLowerCase();
+}
+
+function isSameTrack(left = {}, right = {}) {
+  return getTrackIdentity(left) === getTrackIdentity(right);
+}
+
+function notifySessionUpdated(session) {
+  sessionListeners.forEach((listener) => {
+    try {
+      listener(session);
+    } catch (error) {
+      // Listener failures must never interrupt recording.
+    }
+  });
 }
 
 function buildRoutePoint(coords, segmentIndex = 0) {
   return {
     latitude: coords.latitude,
     longitude: coords.longitude,
+    accuracy: coords.accuracy ?? null,
+    speed: coords.speed ?? null,
     recordedAt: new Date().toISOString(),
     segmentIndex,
   };
 }
 
-function updateRoutePoints(routePoints = [], point) {
-  const lastPoint = routePoints[routePoints.length - 1];
-  const lastSegmentIndex = Number.isInteger(lastPoint?.segmentIndex) ? lastPoint.segmentIndex : 0;
+function shouldKeepRoutePoint(routePoints = [], point) {
+  if (!point) {
+    return false;
+  }
+
   if (
-    routePoints.length > 0 &&
-    lastSegmentIndex === point.segmentIndex &&
-    getDistanceMeters(lastPoint.latitude, lastPoint.longitude, point.latitude, point.longitude) < ROUTE_POINT_MIN_DISTANCE_M
+    typeof point.accuracy === 'number' &&
+    Number.isFinite(point.accuracy) &&
+    point.accuracy > LOCATION_ACCURACY_THRESHOLD
   ) {
+    return false;
+  }
+
+  const lastPoint = routePoints[routePoints.length - 1];
+  if (!lastPoint) {
+    return true;
+  }
+
+  const distance = getDistanceMeters(lastPoint.latitude, lastPoint.longitude, point.latitude, point.longitude);
+  const adaptiveMinimumDistance = Math.max(
+    MIN_DISTANCE_TO_ADD_POINT,
+    Math.min(10, (point.accuracy || 0) * STATIONARY_ACCURACY_FACTOR)
+  );
+  if (distance <= adaptiveMinimumDistance) {
+    return false;
+  }
+
+  const lastRecordedAt = new Date(lastPoint.recordedAt || 0).getTime();
+  const nextRecordedAt = new Date(point.recordedAt || 0).getTime();
+  const elapsedMs = Number.isFinite(lastRecordedAt) && Number.isFinite(nextRecordedAt)
+    ? Math.max(0, nextRecordedAt - lastRecordedAt)
+    : 0;
+  const elapsedSeconds = elapsedMs / 1000;
+  const calculatedSpeed = elapsedSeconds > 0 ? distance / elapsedSeconds : 0;
+  const reportedSpeed = typeof point.speed === 'number' && Number.isFinite(point.speed) ? point.speed : 0;
+
+  if (
+    distance >= GPS_JUMP_DISTANCE_THRESHOLD &&
+    elapsedMs > 0 &&
+    elapsedMs <= GPS_JUMP_TIME_THRESHOLD_MS &&
+    Math.max(calculatedSpeed, reportedSpeed) > MAX_REASONABLE_WALKING_SPEED
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function updateRoutePoints(routePoints = [], point) {
+  if (!shouldKeepRoutePoint(routePoints, point)) {
     return routePoints;
   }
 
   return [...routePoints, point].slice(-ROUTE_POINT_MAX_COUNT);
+}
+
+function downsamplePoints(points = [], maxPoints = SAVED_ROUTE_POINT_MAX_COUNT) {
+  if (points.length <= maxPoints) {
+    return points;
+  }
+  const lastIndex = points.length - 1;
+  const step = lastIndex / (maxPoints - 1);
+  return Array.from({ length: maxPoints }, (_, index) => points[Math.round(index * step)]).filter(Boolean);
 }
 
 function getRouteDistanceMeters(routePoints = []) {
@@ -235,16 +331,47 @@ function getSegmentTrack(segment = {}) {
   return hasValidTrack(segment.track) ? segment.track : null;
 }
 
-function buildSegment(track, point, recordedAt, placeName) {
+function buildRouteSegment(segment = {}, endIndex = 0) {
+  const startIndex = Number.isInteger(segment.startIndex) && segment.startIndex >= 0
+    ? segment.startIndex
+    : 0;
   return {
-    id: `${getTrackKey(track)}:${recordedAt}`,
+    id: segment.id,
+    trackKey: segment.trackKey,
+    ...getTrackSummary(segment.track || segment, segment.albumColor),
+    startIndex,
+    endIndex: Math.max(startIndex, Number.isInteger(endIndex) ? endIndex : startIndex),
+    startedAt: segment.startedAt,
+    endedAt: segment.endedAt || segment.lastUpdatedAt || '',
+  };
+}
+
+function upsertRouteSegment(session, segment) {
+  if (!segment?.id) return session.routeSegments || [];
+  const endIndex = Math.max(0, (session.routePoints || []).length - 1);
+  const nextSegment = buildRouteSegment(segment, endIndex);
+  const routeSegments = Array.isArray(session.routeSegments) ? session.routeSegments : [];
+  const existingIndex = routeSegments.findIndex((item) => item?.id === segment.id);
+  if (existingIndex < 0) {
+    return [...routeSegments, nextSegment].slice(-120);
+  }
+  return routeSegments.map((item, index) => (index === existingIndex ? nextSegment : item)).slice(-120);
+}
+
+function buildSegment(track, point, recordedAt, placeName, startIndex = 0) {
+  const albumColor = getAlbumColor(track);
+  return {
+    id: buildRecordId('segment', track, recordedAt),
     track,
     trackKey: getTrackKey(track),
-    albumColor: getAlbumColor(track),
-    albumArtUrl: track.artworkUrl || '',
+    ...getTrackSummary(track, albumColor),
+    albumColor,
+    albumArtUrl: getAlbumArtUrl(track),
     placeName,
     startedAt: recordedAt,
     lastUpdatedAt: recordedAt,
+    startIndex,
+    endIndex: startIndex,
     routePoints: [point],
   };
 }
@@ -261,14 +388,72 @@ function appendSessionRoutePoint(session, point) {
   return updateRoutePoints(baseRoutePoints, point);
 }
 
-function buildTrackChangeMarker(track, point, recordedAt) {
+function getStablePointForNewSegment(session, point) {
+  const routePoints = Array.isArray(session.routePoints) ? session.routePoints : [];
+  if (shouldKeepRoutePoint(routePoints, point)) {
+    return point;
+  }
+  return routePoints[routePoints.length - 1] || point;
+}
+
+function buildTrackChangeMarker(track, point, recordedAt, fromTrackKey = '') {
+  const albumColor = getAlbumColor(track);
   return {
-    id: `${getTrackKey(track)}:${recordedAt}`,
-    track,
+    id: buildRecordId('change', track, recordedAt),
+    fromTrackKey,
+    toTrackKey: getTrackKey(track),
     trackKey: getTrackKey(track),
-    albumColor: getAlbumColor(track),
+    ...getTrackSummary(track, albumColor),
+    albumColor,
     location: point,
     recordedAt,
+  };
+}
+
+async function resolveCurrentSegmentAlbumColor(sessionId, trackKey, track) {
+  const resolvedColor = await resolveAlbumColor(track).catch(() => DEFAULT_ALBUM_COLOR);
+  const session = await readSession();
+  if (!session?.isActive || session.id !== sessionId) {
+    return;
+  }
+  if (session.currentSegment?.trackKey !== trackKey) {
+    return;
+  }
+
+  session.currentSegment = {
+    ...session.currentSegment,
+    ...getTrackSummary(session.currentSegment.track || track, resolvedColor),
+    albumColor: resolvedColor,
+  };
+  session.routeSegments = upsertRouteSegment(session, session.currentSegment);
+  session.trackChangeMarkers = Array.isArray(session.trackChangeMarkers)
+    ? session.trackChangeMarkers.map((marker) => (
+      marker?.trackKey === trackKey
+        ? { ...marker, albumColor: resolvedColor }
+        : marker
+    ))
+    : [];
+  await maybeWriteSession(session, { force: true }).catch(() => null);
+  notifySessionUpdated({
+    ...session,
+    maxDurationMs: MAX_RECORDING_DURATION_MS,
+    elapsedMs: getElapsedMs(session),
+  });
+}
+
+function scheduleAlbumColorResolution(session, track) {
+  const trackKey = getTrackKey(track);
+  if (!session?.id || !trackKey) return;
+  resolveCurrentSegmentAlbumColor(session.id, trackKey, track).catch(() => null);
+}
+
+export function subscribeMusicMapRecordingSession(listener) {
+  if (typeof listener !== 'function') {
+    return () => {};
+  }
+  sessionListeners.add(listener);
+  return () => {
+    sessionListeners.delete(listener);
   };
 }
 
@@ -289,8 +474,12 @@ async function saveSegment(session, segment, endedAt = new Date().toISOString())
   }
   await AsyncStorage.setItem(saveLockKey, 'true');
 
-  const routePoints = Array.isArray(segment.routePoints) ? segment.routePoints : [];
-  const renderableRoutePoints = getRenderableRoutePoints(routePoints);
+  const segmentRoutePoints = Array.isArray(segment.routePoints) ? segment.routePoints : [];
+  const sessionRoutePoints = Array.isArray(session.routePoints) ? session.routePoints : [];
+  const routePoints = segmentRoutePoints.length > 1 || (session.savedSegmentKeys || []).length > 0
+    ? segmentRoutePoints
+    : sessionRoutePoints;
+  const renderableRoutePoints = downsamplePoints(getRenderableRoutePoints(routePoints));
   const firstPoint = renderableRoutePoints[0];
   const lastPoint = renderableRoutePoints[renderableRoutePoints.length - 1] || firstPoint;
   if (!firstPoint || !lastPoint || !hasPlayableRoute(renderableRoutePoints)) {
@@ -317,6 +506,11 @@ async function saveSegment(session, segment, endedAt = new Date().toISOString())
       latitude: lastPoint.latitude,
       longitude: lastPoint.longitude,
       routePoints: renderableRoutePoints,
+      routeSegments: [buildRouteSegment({
+        ...segment,
+        startIndex: 0,
+        endIndex: Math.max(0, renderableRoutePoints.length - 1),
+      }, Math.max(0, renderableRoutePoints.length - 1))],
       playedDurationMs,
       startedAt: segment.startedAt,
       recordedAt: endedAt,
@@ -364,6 +558,7 @@ export async function startMusicMapRecordingSession({
   const point = normalizeCoords(coords);
   const track = hasValidTrack(initialTrack) ? initialTrack : null;
   const initialRoutePoint = point ? buildRoutePoint(point, 0) : null;
+  const currentSegment = track && initialRoutePoint ? buildSegment(track, initialRoutePoint, now, placeName, 0) : null;
   const session = {
     id: `music-map-session-${Date.now()}`,
     isActive: true,
@@ -371,7 +566,7 @@ export async function startMusicMapRecordingSession({
     placeName,
     startedAt: now,
     lastUpdatedAt: now,
-    currentSegment: track && initialRoutePoint ? buildSegment(track, initialRoutePoint, now, placeName) : null,
+    currentSegment,
     lastPlaybackState: initialPlaybackState || (track ? sanitizePlaybackState({
       isPlaying: true,
       currentTrack: track,
@@ -382,10 +577,14 @@ export async function startMusicMapRecordingSession({
     savedSegmentKeys: [],
     startLocation: point,
     routePoints: initialRoutePoint ? [initialRoutePoint] : [],
+    routeSegments: currentSegment ? [buildRouteSegment(currentSegment, 0)] : [],
     trackChangeMarkers: [],
   };
 
   await writeSession(session);
+  if (track) {
+    scheduleAlbumColorResolution(session, track);
+  }
   return getMusicMapRecordingSession();
 }
 
@@ -476,20 +675,27 @@ export async function recordCurrentMusicMapPlayback({
     const currentSegment = session.currentSegment;
     const savedRecords = [];
 
-    if (currentSegment?.trackKey && currentSegment.trackKey !== trackKey) {
+    if (currentSegment?.trackKey && !isSameTrack(currentSegment, track)) {
       const saved = await saveSegment(session, currentSegment, recordedAt).catch(() => null);
       if (saved) {
         savedRecords.push(saved);
       }
       session.savedSegmentKeys = [...(session.savedSegmentKeys || []), currentSegment.id].filter(Boolean).slice(-120);
-      const point = buildRoutePoint(pointCoords, 0);
+      const point = getStablePointForNewSegment(session, buildRoutePoint(pointCoords, 0));
       session.routePoints = appendSessionRoutePoint(session, point);
+      const startIndex = Math.max(0, (session.routePoints || []).length - 1);
       session.trackChangeMarkers = [
         ...(session.trackChangeMarkers || []),
-        buildTrackChangeMarker(track, point, recordedAt),
+        buildTrackChangeMarker(track, point, recordedAt, currentSegment.trackKey || ''),
       ].slice(-120);
-      session.currentSegment = buildSegment(track, point, recordedAt, placeName || session.placeName || '');
-    } else if (currentSegment?.trackKey === trackKey) {
+      session.routeSegments = upsertRouteSegment(session, {
+        ...currentSegment,
+        endedAt: recordedAt,
+      });
+      session.currentSegment = buildSegment(track, point, recordedAt, placeName || session.placeName || '', startIndex);
+      session.routeSegments = upsertRouteSegment(session, session.currentSegment);
+      scheduleAlbumColorResolution(session, track);
+    } else if (currentSegment?.trackKey && isSameTrack(currentSegment, track)) {
       const routePoints = currentSegment.routePoints || [];
       const lastPoint = routePoints[routePoints.length - 1];
       const segmentIndex = Number.isInteger(lastPoint?.segmentIndex) ? lastPoint.segmentIndex : 0;
@@ -507,18 +713,24 @@ export async function recordCurrentMusicMapPlayback({
       session.currentSegment = {
         ...currentSegment,
         track,
-        albumColor: getAlbumColor(track),
-        albumArtUrl: track.artworkUrl || currentSegment.albumArtUrl || '',
+        ...getTrackSummary(track, currentSegment.albumColor || getAlbumColor(track)),
+        albumColor: currentSegment.albumColor || getAlbumColor(track),
+        albumArtUrl: getAlbumArtUrl(track) || currentSegment.albumArtUrl || '',
         placeName: placeName || currentSegment.placeName || session.placeName || '',
         routePoints: nextRoutePoints,
+        endIndex: Math.max(currentSegment.startIndex || 0, (session.routePoints || []).length - 1),
         lastUpdatedAt: recordedAt,
         pausedAt: '',
         shouldBreakRoute: false,
       };
+      session.routeSegments = upsertRouteSegment(session, session.currentSegment);
     } else {
-      const point = buildRoutePoint(pointCoords, 0);
+      const point = getStablePointForNewSegment(session, buildRoutePoint(pointCoords, 0));
       session.routePoints = appendSessionRoutePoint(session, point);
-      session.currentSegment = buildSegment(track, point, recordedAt, placeName || session.placeName || '');
+      const startIndex = Math.max(0, (session.routePoints || []).length - 1);
+      session.currentSegment = buildSegment(track, point, recordedAt, placeName || session.placeName || '', startIndex);
+      session.routeSegments = upsertRouteSegment(session, session.currentSegment);
+      scheduleAlbumColorResolution(session, track);
     }
 
     session.lastUpdatedAt = recordedAt;

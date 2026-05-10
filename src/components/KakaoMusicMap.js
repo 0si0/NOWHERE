@@ -76,8 +76,49 @@ function normalizeMarkers(markers = []) {
       id: marker.id || `marker-${index}`,
       location,
       albumColor: marker.albumColor,
-      track: marker.track,
+      fromTrackKey: marker.fromTrackKey || '',
+      toTrackKey: marker.toTrackKey || marker.trackKey || '',
+      trackId: marker.trackId || marker.track?.id || marker.track?.spotifyUri || marker.track?.uri || '',
+      trackName: marker.trackName || marker.track?.title || '',
+      artistName: marker.artistName || marker.track?.artist || '',
+      albumName: marker.albumName || marker.track?.album || '',
+      albumArtUrl: marker.albumArtUrl || marker.track?.artworkUrl || '',
       recordedAt: marker.recordedAt,
+    };
+  }).filter(Boolean);
+}
+
+function normalizeRouteSegments(segments = [], routePoints = []) {
+  const segmentList = Array.isArray(segments) ? segments : [];
+  return segmentList.map((segment, index) => {
+    if (!segment || typeof segment !== 'object') {
+      return null;
+    }
+    const startIndex = Number.isInteger(segment.startIndex) && segment.startIndex >= 0 ? segment.startIndex : 0;
+    const endIndex = Number.isInteger(segment.endIndex) && segment.endIndex >= startIndex
+      ? segment.endIndex
+      : startIndex;
+    const sourcePoints = Array.isArray(segment.routePoints) && segment.routePoints.length > 0
+      ? segment.routePoints
+      : routePoints.slice(startIndex, endIndex + 1);
+    const normalizedPoints = downsamplePoints(sourcePoints.map(normalizePoint).filter(Boolean));
+    if (normalizedPoints.length === 0) {
+      return null;
+    }
+    return {
+      id: segment.id || `segment-${index}`,
+      trackId: segment.trackId || '',
+      trackKey: segment.trackKey || '',
+      trackName: segment.trackName || segment.track?.title || '',
+      artistName: segment.artistName || segment.track?.artist || '',
+      albumName: segment.albumName || segment.track?.album || '',
+      albumArtUrl: segment.albumArtUrl || segment.track?.artworkUrl || '',
+      albumColor: segment.albumColor || '#FFC8B8',
+      startIndex,
+      endIndex,
+      startedAt: segment.startedAt,
+      endedAt: segment.endedAt,
+      routePoints: normalizedPoints,
     };
   }).filter(Boolean);
 }
@@ -102,6 +143,7 @@ function serializeRecords(records = []) {
   return records.slice(0, MAX_MAP_RECORDS).map((record) => {
     const rawRoutePoints = Array.isArray(record.routePoints) ? record.routePoints : [];
     const routePoints = downsamplePoints(rawRoutePoints.map(normalizePoint).filter(Boolean));
+    const routeSegments = normalizeRouteSegments(record.routeSegments, routePoints);
     const location = normalizePoint(record.location) || routePoints[routePoints.length - 1] || normalizePoint(record.startLocation);
     if (!location) {
       return null;
@@ -112,6 +154,8 @@ function serializeRecords(records = []) {
       isLive: Boolean(record.isLive),
       recordType: record.recordType,
       albumColor: record.albumColor,
+      startAlbumColor: record.startAlbumColor,
+      endAlbumColor: record.endAlbumColor,
       albumArtUrl: record.albumArtUrl,
       placeName: record.placeName,
       location,
@@ -120,6 +164,7 @@ function serializeRecords(records = []) {
       endLocation: normalizePoint(record.endLocation),
       endpointPinsMerged: Boolean(record.endpointPinsMerged),
       routePoints,
+      routeSegments,
       trackChangeMarkers: normalizeMarkers(record.trackChangeMarkers || []),
       routeDistance: record.routeDistance || 0,
       playedDurationMs: record.playedDurationMs,
@@ -151,13 +196,20 @@ function getRecordsSignature(records = [], mode, selectedRecordId, shouldFit) {
     records: safeRecords.map((record) => {
       const routePoints = Array.isArray(record.routePoints) ? record.routePoints : [];
       const lastPoint = routePoints[routePoints.length - 1] || record.currentLocation || record.location;
+      const routeSegmentSignature = Array.isArray(record.routeSegments)
+        ? record.routeSegments.map((segment) => `${segment?.id || ''}:${segment?.albumColor || ''}:${segment?.endIndex ?? ''}`).join('|')
+        : '';
       return {
         id: record.id,
         sessionId: record.sessionId,
         isLive: Boolean(record.isLive),
         recordType: record.recordType,
         color: record.albumColor,
+        startColor: record.startAlbumColor,
+        endColor: record.endAlbumColor,
         routeCount: routePoints.length,
+        segmentCount: Array.isArray(record.routeSegments) ? record.routeSegments.length : 0,
+        routeSegmentSignature,
         markerCount: Array.isArray(record.trackChangeMarkers) ? record.trackChangeMarkers.length : 0,
         lastPoint: getPointSignature(lastPoint),
         currentLocation: getPointSignature(record.currentLocation),

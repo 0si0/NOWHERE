@@ -85,6 +85,10 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       return try await self.getSpotifyPlaylistTracks(playlistId: playlistId, limit: max(1, min(limit, 50)))
     }
 
+    AsyncFunction("extractAlbumColorAsync") { (albumArtUrl: String) async throws -> String in
+      return try await self.extractDominantAlbumColor(urlString: albumArtUrl)
+    }
+
     AsyncFunction("prepareAutoPlayAsync") { (options: [String: Any]) async throws -> [String: Any?] in
       self.applyOptions(options)
       try await self.ensureAuthorized()
@@ -939,6 +943,82 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       .replacingOccurrences(of: "+", with: "-")
       .replacingOccurrences(of: "/", with: "_")
       .replacingOccurrences(of: "=", with: "")
+  }
+
+  private func extractDominantAlbumColor(urlString: String) async throws -> String {
+    try await Task.detached(priority: .utility) {
+      guard let url = URL(string: urlString), !urlString.isEmpty else {
+        throw NowherePlayerException("Album artwork URL is invalid.")
+      }
+      let data = try Data(contentsOf: url)
+      guard let image = UIImage(data: data), let cgImage = image.cgImage else {
+        throw NowherePlayerException("Album artwork could not be decoded.")
+      }
+
+      let width = 32
+      let height = 32
+      let bytesPerPixel = 4
+      let bytesPerRow = width * bytesPerPixel
+      var pixels = [UInt8](repeating: 0, count: width * height * bytesPerPixel)
+      let colorSpace = CGColorSpaceCreateDeviceRGB()
+      guard let context = CGContext(
+        data: &pixels,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: bytesPerRow,
+        space: colorSpace,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+      ) else {
+        throw NowherePlayerException("Album artwork canvas could not be created.")
+      }
+
+      context.interpolationQuality = .medium
+      context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+      var buckets: [String: (count: Int, red: Int, green: Int, blue: Int)] = [:]
+      var redTotal = 0
+      var greenTotal = 0
+      var blueTotal = 0
+      var averageCount = 0
+
+      stride(from: 0, to: pixels.count, by: 4).forEach { index in
+        let red = Int(pixels[index])
+        let green = Int(pixels[index + 1])
+        let blue = Int(pixels[index + 2])
+        let alpha = Int(pixels[index + 3])
+        guard alpha >= 180 else { return }
+
+        redTotal += red
+        greenTotal += green
+        blueTotal += blue
+        averageCount += 1
+
+        let luma = (0.2126 * Double(red)) + (0.7152 * Double(green)) + (0.0722 * Double(blue))
+        guard luma >= 24, luma <= 238 else { return }
+
+        let bucketRed = min(255, Int((Double(red) / 24.0).rounded()) * 24)
+        let bucketGreen = min(255, Int((Double(green) / 24.0).rounded()) * 24)
+        let bucketBlue = min(255, Int((Double(blue) / 24.0).rounded()) * 24)
+        let key = "\(bucketRed),\(bucketGreen),\(bucketBlue)"
+        let current = buckets[key] ?? (count: 0, red: bucketRed, green: bucketGreen, blue: bucketBlue)
+        buckets[key] = (count: current.count + 1, red: bucketRed, green: bucketGreen, blue: bucketBlue)
+      }
+
+      if let dominant = buckets.values.max(by: { $0.count < $1.count }) {
+        return String(format: "#%02X%02X%02X", dominant.red, dominant.green, dominant.blue)
+      }
+
+      guard averageCount > 0 else {
+        throw NowherePlayerException("Album artwork did not contain usable pixels.")
+      }
+      return String(
+        format: "#%02X%02X%02X",
+        redTotal / averageCount,
+        greenTotal / averageCount,
+        blueTotal / averageCount
+      )
+    }.value
   }
 }
 

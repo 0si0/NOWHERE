@@ -785,19 +785,16 @@ export async function saveMusicMapRecord(input) {
     }
     return savedRecord;
   } catch (error) {
-    if (isPermissionDeniedError(error)) {
-      const records = await readLocalMusicMapRecords();
-      await writeLocalMusicMapRecords([{
-        ...localPayload,
-        remoteError: 'permission-denied',
-        syncStatus: 'localOnly',
-      }, ...records]);
-      if (publishPublic) {
-        await publishMusicMapPublicRecord(sanitized);
-      }
-      return localPayload;
+    const records = await readLocalMusicMapRecords();
+    await writeLocalMusicMapRecords([{
+      ...localPayload,
+      remoteError: isPermissionDeniedError(error) ? 'permission-denied' : String(error?.code || error?.message || 'remote-save-failed'),
+      syncStatus: 'localOnly',
+    }, ...records]);
+    if (publishPublic) {
+      await publishMusicMapPublicRecord(sanitized);
     }
-    throw error;
+    return localPayload;
   }
 }
 

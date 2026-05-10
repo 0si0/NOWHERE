@@ -96,6 +96,20 @@
       border: 3px solid rgba(5, 7, 10, 0.55);
       box-shadow: 0 0 0 8px rgba(124, 255, 178, 0.22), 0 0 22px currentColor;
     }
+    .track-endpoint {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      border: 4px solid rgba(255, 241, 236, 0.9);
+      background: currentColor;
+      box-shadow: 0 0 22px currentColor, 0 6px 16px rgba(0, 0, 0, 0.36);
+      box-sizing: border-box;
+    }
+    .track-endpoint.selected {
+      width: 28px;
+      height: 28px;
+      box-shadow: 0 0 28px currentColor, 0 0 0 12px rgba(255, 201, 184, 0.13);
+    }
     .pin.start-pin {
       width: 22px;
       height: 22px;
@@ -111,13 +125,14 @@
       height: 28px;
       box-shadow: 0 0 24px currentColor, 0 0 0 10px rgba(255, 201, 184, 0.12);
     }
-    .song-change-dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 99px;
+    .track-change-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
       border: 2px solid rgba(5, 7, 10, 0.68);
       background: currentColor;
       box-shadow: 0 0 12px currentColor;
+      box-sizing: border-box;
     }
     .label {
       padding: 7px 11px;
@@ -211,6 +226,7 @@
       var overlay = new kakao.maps.CustomOverlay({
         position: position,
         content: node,
+        xAnchor: 0.5,
         yAnchor: className.indexOf('pin') >= 0 ? 1 : 0.5,
         zIndex: record.id === latestPayload.selectedRecordId ? 30 : 10
       });
@@ -245,53 +261,96 @@
       var points = rawPoints.map(function(point) {
         return new kakao.maps.LatLng(point.latitude, point.longitude);
       });
+      function getFirstSegmentColor() {
+        var segments = (record.routeSegments || []).filter(function(segment) {
+          return segment && segment.albumColor;
+        });
+        return record.startAlbumColor || (segments[0] && segments[0].albumColor) || record.albumColor || '#FFC8B8';
+      }
+      function getLastSegmentColor() {
+        var segments = (record.routeSegments || []).filter(function(segment) {
+          return segment && segment.albumColor;
+        });
+        var lastSegment = segments[segments.length - 1];
+        return record.endAlbumColor || (lastSegment && lastSegment.albumColor) || record.albumColor || '#FFC8B8';
+      }
 
       function renderTrackMarkers(lastPosition) {
         var startPosition = pointToLatLng(record.startLocation) || points[0] || lastPosition;
         var endPosition = pointToLatLng(record.endLocation) || (!record.isLive ? lastPosition : null);
+        var startColor = getFirstSegmentColor();
+        var endColor = getLastSegmentColor();
 
         if (record.isLive) {
           if (points.length >= 2 && startPosition) {
-            createOverlay(record, startPosition, 'pin start-pin', '#7CFFB2');
+            createOverlay(record, startPosition, 'track-endpoint', startColor);
           }
           if (lastPosition) {
-            createOverlay(record, lastPosition, 'route-dot live');
+            createOverlay(record, lastPosition, 'route-dot live', endColor);
           }
         } else if (record.endpointPinsMerged || !endPosition) {
           if (lastPosition || startPosition) {
-            createOverlay(record, lastPosition || startPosition, record.id === latestPayload.selectedRecordId ? 'pin session-pin selected' : 'pin session-pin');
+            createOverlay(record, lastPosition || startPosition, record.id === latestPayload.selectedRecordId ? 'track-endpoint selected' : 'track-endpoint', endColor);
           }
         } else {
           if (startPosition) {
-            createOverlay(record, startPosition, 'pin start-pin', '#7CFFB2');
+            createOverlay(record, startPosition, 'track-endpoint', startColor);
           }
           if (endPosition) {
-            createOverlay(record, endPosition, record.id === latestPayload.selectedRecordId ? 'pin end-pin selected' : 'pin end-pin', '#FFC8B8');
+            createOverlay(record, endPosition, record.id === latestPayload.selectedRecordId ? 'track-endpoint selected' : 'track-endpoint', endColor);
           }
         }
 
         (record.trackChangeMarkers || []).forEach(function(marker) {
           var markerPosition = pointToLatLng(marker.location || marker.point);
           if (markerPosition) {
-            createOverlay(record, markerPosition, 'song-change-dot', marker.albumColor || record.albumColor || '#FFC8B8');
+            createOverlay(record, markerPosition, 'track-change-dot', marker.albumColor || record.albumColor || '#FFC8B8');
           }
         });
       }
 
-      if (points.length >= 2) {
-        var polyline = new kakao.maps.Polyline({
+      var segmentPolylines = [];
+      (record.routeSegments || []).forEach(function(segment) {
+        var segmentPoints = (segment.routePoints || [])
+          .filter(function(point) {
+            return typeof point.latitude === 'number' && typeof point.longitude === 'number';
+          })
+          .map(function(point) {
+            return new kakao.maps.LatLng(point.latitude, point.longitude);
+          });
+        if (segmentPoints.length < 2) return;
+        var segmentPolyline = new kakao.maps.Polyline({
           map: map,
-          path: points,
+          path: segmentPoints,
           strokeWeight: record.isLive ? 7 : record.id === latestPayload.selectedRecordId ? 8 : 5,
-          strokeColor: record.albumColor || '#FFC8B8',
+          strokeColor: segment.albumColor || record.albumColor || '#FFC8B8',
           strokeOpacity: record.isLive ? 0.96 : record.id === latestPayload.selectedRecordId ? 0.98 : 0.72,
           strokeStyle: 'solid',
           zIndex: record.isLive ? 28 : record.id === latestPayload.selectedRecordId ? 20 : 8
         });
-        kakao.maps.event.addListener(polyline, 'click', function() {
+        kakao.maps.event.addListener(segmentPolyline, 'click', function() {
           selectRecord(record);
         });
-        polylines.push(polyline);
+        polylines.push(segmentPolyline);
+        segmentPolylines.push(segmentPolyline);
+      });
+
+      if (segmentPolylines.length > 0 || points.length >= 2) {
+        if (segmentPolylines.length === 0) {
+          var polyline = new kakao.maps.Polyline({
+            map: map,
+            path: points,
+            strokeWeight: record.isLive ? 7 : record.id === latestPayload.selectedRecordId ? 8 : 5,
+            strokeColor: record.albumColor || '#FFC8B8',
+            strokeOpacity: record.isLive ? 0.96 : record.id === latestPayload.selectedRecordId ? 0.98 : 0.72,
+            strokeStyle: 'solid',
+            zIndex: record.isLive ? 28 : record.id === latestPayload.selectedRecordId ? 20 : 8
+          });
+          kakao.maps.event.addListener(polyline, 'click', function() {
+            selectRecord(record);
+          });
+          polylines.push(polyline);
+        }
         var pointPosition = record.isLive && livePosition ? livePosition : points[points.length - 1];
         renderTrackMarkers(pointPosition);
         return;
@@ -322,6 +381,9 @@
         extendPoint(record.endLocation);
         extendPoint(record.currentLocation);
         (record.routePoints || []).forEach(extendPoint);
+        (record.routeSegments || []).forEach(function(segment) {
+          (segment.routePoints || []).forEach(extendPoint);
+        });
       });
       if (count > 1) {
         map.setBounds(bounds, 46, 46, 46, 46);

@@ -40,7 +40,7 @@ const PERIOD_FILTERS = [
   { key: 'week', label: '일주일' },
   { key: 'date', label: '기간 선택' },
 ];
-const MEANINGFUL_ROUTE_DISTANCE_M = 35;
+const MEANINGFUL_ROUTE_DISTANCE_M = 5;
 const LIVE_ROUTE_POINT_MIN_DISTANCE_M = 3;
 const START_END_PIN_MIN_DISTANCE_M = 25;
 const MAX_DISPLAY_ROUTE_POINTS = 360;
@@ -211,6 +211,132 @@ function getRecordPoints(record = {}, segmentIndex = 0) {
   return fallbackPoint ? [fallbackPoint] : [];
 }
 
+function getTrackSummary(record = {}, albumColor = UI.peach) {
+  const track = record.track || {};
+  return {
+    trackId: track.id || track.spotifyUri || track.uri || record.trackId || record.spotifyUri || record.uri || '',
+    trackKey: record.trackKey || record.trackId || record.spotifyUri || record.uri || track.id || track.spotifyUri || track.uri || getRecordKey(record),
+    trackName: record.trackName || track.title || record.title || 'Unknown Track',
+    artistName: record.artistName || track.artist || record.artist || '',
+    albumName: record.albumName || track.album || record.album || '',
+    albumArtUrl: record.albumArtUrl || track.artworkUrl || '',
+    albumColor: albumColor || record.albumColor || UI.peach,
+  };
+}
+
+function getTrackDedupeKey(record = {}) {
+  const summary = getTrackSummary(record);
+  if (summary.trackId) return `id:${summary.trackId}`;
+  if (summary.trackKey) return `key:${summary.trackKey}`;
+  return `text:${summary.trackName}:${summary.artistName}`.toLowerCase();
+}
+
+function dedupeDisplayTracks(records = []) {
+  const seen = new Set();
+  const tracks = [];
+
+  records.forEach((record, index) => {
+    const summary = getTrackSummary(record, record.albumColor || UI.peach);
+    const dedupeKey = getTrackDedupeKey(record);
+    const existing = tracks.find((item) => item.dedupeKey === dedupeKey);
+    if (existing) {
+      existing.playedDurationMs += record.playedDurationMs || 0;
+      return;
+    }
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    tracks.push({
+      key: `${summary.trackId || summary.trackKey || record.id || summary.trackName}-${index}`,
+      dedupeKey,
+      title: summary.trackName,
+      artist: summary.artistName || 'Unknown Artist',
+      artworkUrl: summary.albumArtUrl,
+      albumColor: summary.albumColor,
+      playedDurationMs: record.playedDurationMs || 0,
+      recordedAt: record.recordedAt,
+      record,
+    });
+  });
+
+  return tracks;
+}
+
+function getRouteSegmentColor(segments = [], position = 'last') {
+  const validSegments = Array.isArray(segments)
+    ? segments.filter((segment) => segment?.albumColor)
+    : [];
+  if (validSegments.length === 0) return '';
+  return position === 'first'
+    ? validSegments[0].albumColor
+    : validSegments[validSegments.length - 1].albumColor;
+}
+
+function buildRouteSegmentsFromRecords(sortedRecords = []) {
+  const routePoints = [];
+  const routeSegments = [];
+
+  sortedRecords.forEach((record, recordIndex) => {
+    const segmentPoints = getRecordPoints(record, recordIndex);
+    if (segmentPoints.length === 0) return;
+
+    const startIndex = routePoints.length;
+    routePoints.push(...segmentPoints);
+    const endIndex = Math.max(startIndex, routePoints.length - 1);
+    const storedSegment = Array.isArray(record.routeSegments) ? record.routeSegments[0] : null;
+    const albumColor = storedSegment?.albumColor || record.albumColor || UI.peach;
+
+    routeSegments.push({
+      id: storedSegment?.id || `${record.id || getRecordKey(record)}-segment-${recordIndex}`,
+      ...getTrackSummary({ ...record, ...storedSegment }, albumColor),
+      startIndex,
+      endIndex,
+      startedAt: storedSegment?.startedAt || record.startedAt || record.recordedAt,
+      endedAt: storedSegment?.endedAt || record.recordedAt || record.startedAt,
+      routePoints: downsamplePoints(segmentPoints.map((point) => normalizePoint(point, recordIndex)).filter(Boolean), 120),
+    });
+  });
+
+  return {
+    routePoints,
+    routeSegments,
+  };
+}
+
+function buildRouteSegmentsFromSession(session = {}, routePoints = []) {
+  const sessionSegments = Array.isArray(session.routeSegments) ? session.routeSegments : [];
+  if (sessionSegments.length > 0) {
+    return sessionSegments.map((segment, index) => {
+      const startIndex = Math.max(0, Number.isInteger(segment.startIndex) ? segment.startIndex : 0);
+      const endIndex = Math.max(startIndex, Number.isInteger(segment.endIndex) ? segment.endIndex : routePoints.length - 1);
+      const segmentPoints = routePoints.slice(startIndex, endIndex + 1);
+      if (segmentPoints.length === 0) return null;
+      const albumColor = segment.albumColor || UI.peach;
+      return {
+        id: segment.id || `live-segment-${index}`,
+        ...getTrackSummary(segment, albumColor),
+        startIndex,
+        endIndex,
+        startedAt: segment.startedAt,
+        endedAt: segment.endedAt,
+        routePoints: downsamplePoints(segmentPoints, 120),
+      };
+    }).filter(Boolean);
+  }
+
+  const currentSegment = session.currentSegment || {};
+  if (routePoints.length === 0) return [];
+  const albumColor = currentSegment.albumColor || UI.peach;
+  return [{
+    id: currentSegment.id || 'live-segment',
+    ...getTrackSummary(currentSegment, albumColor),
+    startIndex: 0,
+    endIndex: Math.max(0, routePoints.length - 1),
+    startedAt: currentSegment.startedAt || session.startedAt,
+    endedAt: currentSegment.lastUpdatedAt || session.lastUpdatedAt,
+    routePoints: downsamplePoints(routePoints, 120),
+  }];
+}
+
 function getAveragePoint(points = []) {
   if (points.length === 0) return null;
   const total = points.reduce((next, point) => ({
@@ -266,7 +392,9 @@ function buildSessionDisplayRecord(sessionRecords = [], fallbackIndex = 0) {
   if (sorted.length === 0) {
     return null;
   }
-  const routePoints = downsamplePoints(sorted.flatMap((record) => getRecordPoints(record, 0)));
+  const builtRoute = buildRouteSegmentsFromRecords(sorted);
+  const routePoints = downsamplePoints(builtRoute.routePoints);
+  const routeSegments = builtRoute.routeSegments;
   const routeDistance = getRouteDistanceMeters(routePoints);
   const first = sorted[0] || {};
   const last = sorted[sorted.length - 1] || first;
@@ -285,35 +413,37 @@ function buildSessionDisplayRecord(sessionRecords = [], fallbackIndex = 0) {
   }
   const trackChangeMarkers = sorted.slice(1).map((record, index) => {
     const point = getRecordPoints(record, index + 1)[0];
+    const previousRecord = sorted[index];
+    if (previousRecord && getTrackDedupeKey(previousRecord) === getTrackDedupeKey(record)) {
+      return null;
+    }
     if (!point) return null;
     return {
       id: `${record.id || getRecordKey(record)}-change-${index}`,
       location: point,
       albumColor: record.albumColor || UI.peach,
-      track: record.track,
+      fromTrackKey: previousRecord ? getTrackSummary(previousRecord).trackKey : '',
+      toTrackKey: getTrackSummary(record).trackKey,
+      ...getTrackSummary(record, record.albumColor || UI.peach),
       recordedAt: record.startedAt || record.recordedAt,
     };
   }).filter(Boolean);
-  const tracks = sorted.map((record, index) => ({
-    key: `${record.id || getRecordKey(record)}-${index}`,
-    title: recordTitle(record),
-    artist: recordArtist(record),
-    artworkUrl: record.track?.artworkUrl || record.albumArtUrl || '',
-    albumColor: record.albumColor || UI.peach,
-    playedDurationMs: record.playedDurationMs || 0,
-    recordedAt: record.recordedAt,
-    record,
-  }));
+  const tracks = dedupeDisplayTracks(sorted);
+  const startAlbumColor = getRouteSegmentColor(routeSegments, 'first') || first.albumColor || UI.peach;
+  const endAlbumColor = getRouteSegmentColor(routeSegments, 'last') || last.albumColor || first.albumColor || UI.peach;
 
   return {
     id: `session:${sessionId}`,
     sessionId,
     recordType: isTrack ? 'track' : 'pin',
-    albumColor: first.albumColor || UI.peach,
+    albumColor: isTrack ? startAlbumColor : endAlbumColor,
+    startAlbumColor,
+    endAlbumColor,
     albumArtUrl: first.track?.artworkUrl || first.albumArtUrl || '',
     placeName: first.placeName || last.placeName || '내 음악 위치',
     location: pinLocation,
     routePoints: isTrack ? routePoints : [],
+    routeSegments: isTrack ? routeSegments : [],
     startLocation: startLocation || pinLocation,
     endLocation: shouldMergeEndpointPins ? null : endLocation,
     endpointPinsMerged: shouldMergeEndpointPins,
@@ -365,9 +495,9 @@ function buildLiveMusicMapRecord({ session = {}, location, currentTrack }) {
   };
   const sessionRoutePoints = Array.isArray(session.routePoints) ? session.routePoints : [];
   const baseRoutePoints = sessionRoutePoints.length > 0
-    ? downsamplePoints(sessionRoutePoints.map((point) => normalizePoint(point, point.segmentIndex ?? 0)).filter(Boolean))
+    ? sessionRoutePoints.map((point) => normalizePoint(point, point.segmentIndex ?? 0)).filter(Boolean)
     : Array.isArray(currentSegment.routePoints)
-      ? downsamplePoints(currentSegment.routePoints.map((point) => normalizePoint(point, point.segmentIndex ?? 0)).filter(Boolean))
+      ? currentSegment.routePoints.map((point) => normalizePoint(point, point.segmentIndex ?? 0)).filter(Boolean)
       : [];
   const currentPoint = normalizePoint(location, baseRoutePoints[baseRoutePoints.length - 1]?.segmentIndex || 0);
   let routePoints = baseRoutePoints;
@@ -379,6 +509,7 @@ function buildLiveMusicMapRecord({ session = {}, location, currentTrack }) {
     }
   }
 
+  const routeSegments = buildRouteSegmentsFromSession(session, routePoints);
   routePoints = downsamplePoints(routePoints);
   const displayLocation = currentPoint || routePoints[routePoints.length - 1] || normalizePoint(session.startLocation, 0);
   if (!displayLocation) {
@@ -390,18 +521,23 @@ function buildLiveMusicMapRecord({ session = {}, location, currentTrack }) {
 
   const routeDistance = getRouteDistanceMeters(routePoints);
   const startLocation = routePoints[0] || displayLocation;
+  const startAlbumColor = getRouteSegmentColor(routeSegments, 'first') || currentSegment.albumColor || track.color || UI.green;
+  const endAlbumColor = getRouteSegmentColor(routeSegments, 'last') || currentSegment.albumColor || track.color || UI.green;
 
   return {
     id: 'live:music-map-recording',
     sessionId: session.id || 'live',
     isLive: true,
     recordType: 'track',
-    albumColor: currentSegment.albumColor || track.color || UI.green,
+    albumColor: endAlbumColor,
+    startAlbumColor,
+    endAlbumColor,
     albumArtUrl: track.artworkUrl || currentSegment.albumArtUrl || '',
     placeName: currentSegment.placeName || session.placeName || '현재 위치',
     location: startLocation,
     currentLocation: displayLocation,
     routePoints,
+    routeSegments,
     startLocation,
     endLocation: null,
     endpointPinsMerged: true,
@@ -411,7 +547,9 @@ function buildLiveMusicMapRecord({ session = {}, location, currentTrack }) {
           id: marker.id || `live-change-${index}`,
           location: normalizePoint(marker.location || marker.point, marker.segmentIndex ?? 0),
           albumColor: marker.albumColor || UI.peach,
-          track: marker.track,
+          fromTrackKey: marker.fromTrackKey || '',
+          toTrackKey: marker.toTrackKey || marker.trackKey || '',
+          ...getTrackSummary(marker, marker.albumColor || UI.peach),
           recordedAt: marker.recordedAt,
         }))
         .filter((marker) => marker.location)
@@ -453,8 +591,6 @@ function buildTopTracks(records = []) {
       key,
       title: recordTitle(record),
       artist: recordArtist(record),
-      albumColor: record.albumColor || UI.peach,
-      artworkUrl: record.track?.artworkUrl || record.albumArtUrl || '',
       plays: 1,
     });
   });
@@ -493,6 +629,7 @@ export default function MusicMapScreen({ navigation }) {
   const recordingStartedAtRef = useRef(null);
 
   const refreshMusicMapRecording = locationContext?.refreshMusicMapRecording;
+  const refreshLocation = locationContext?.refreshLocation;
   const requestLocationPermissions = locationContext?.requestPermissions;
   const startMusicMapRecording = locationContext?.startMusicMapRecording;
   const stopMusicMapRecording = locationContext?.stopMusicMapRecording;
@@ -505,8 +642,8 @@ export default function MusicMapScreen({ navigation }) {
   const recordingRemainingMs = Math.max(0, (musicMapRecording.maxDurationMs || 60 * 60 * 1000) - recordingElapsedMs);
   const showStartSpinner = isRecordingBusy && !effectiveIsRecording;
 
-  const loadRecords = useCallback(async ({ refreshing = false } = {}) => {
-    if (loadRecordsInFlightRef.current) {
+  const loadRecords = useCallback(async ({ refreshing = false, force = false } = {}) => {
+    if (loadRecordsInFlightRef.current && !force) {
       return loadRecordsInFlightRef.current;
     }
 
@@ -653,8 +790,15 @@ export default function MusicMapScreen({ navigation }) {
       setRecordingElapsedMs(0);
       setRecordingUiPhase('idle');
       try {
-        await stopMusicMapRecording?.();
-        await loadRecords({ refreshing: true });
+        const stopped = await stopMusicMapRecording?.();
+        if (stopped?.savedRecord) {
+          setRecords((previousRecords) => [
+            stopped.savedRecord,
+            ...previousRecords.filter((record) => record.id !== stopped.savedRecord.id),
+          ]);
+          setSelectedRecordId(`session:${stopped.savedRecord.sessionId || stopped.savedRecord.id}`);
+        }
+        await loadRecords({ refreshing: true, force: true });
       } catch (nextError) {
         const message = nextError.message || '뮤직지도 기록 중단에 실패했습니다.';
         setError(message);
@@ -691,6 +835,14 @@ export default function MusicMapScreen({ navigation }) {
           return;
         }
       }
+      const startLocation = location || await refreshLocation?.({ forceWeather: false });
+      if (!startLocation) {
+        Alert.alert(
+          '현재 위치 필요',
+          '현재 위치를 확인한 뒤 뮤직지도 기록을 시작해주세요.'
+        );
+        return;
+      }
 
       recordingStartedAtRef.current = Date.now();
       setRecordingElapsedMs(0);
@@ -719,6 +871,7 @@ export default function MusicMapScreen({ navigation }) {
     playerState.currentTrack,
     playerState.isPlaying,
     requestLocationPermissions,
+    refreshLocation,
     startMusicMapRecording,
     stopMusicMapRecording,
   ]);
@@ -843,6 +996,57 @@ export default function MusicMapScreen({ navigation }) {
                 <Text style={styles.emptyText}>기록하기를 누른 뒤 음악을 들으며 이동하면 경로가 남습니다.</Text>
               </View>
             ) : null}
+            {!effectiveIsRecording && selectedRecord ? (
+              <View style={styles.selectedOverlay}>
+                <View style={styles.selectedOverlayHeader}>
+                  <View style={[styles.selectedOverlayIcon, { borderColor: selectedRecord.albumColor || UI.peach }]}>
+                    <Ionicons
+                      name={selectedRecord.recordType === 'pin' ? 'location-outline' : 'git-branch-outline'}
+                      size={20}
+                      color={selectedRecord.albumColor || UI.peach}
+                    />
+                  </View>
+                  <View style={styles.selectedOverlayTitleWrap}>
+                    <Text style={styles.selectedOverlayTitle} numberOfLines={1}>
+                      {selectedRecord.placeName || '내 음악 위치'}
+                    </Text>
+                    <Text style={styles.selectedOverlayMeta} numberOfLines={1}>
+                      {selectedRecord.tracks.length}곡 · {selectedRecord.recordType === 'pin' ? '한 지점 기록' : `${Math.round(selectedRecord.routeDistance)}m 이동`}
+                    </Text>
+                  </View>
+                  <TouchableOpacity style={styles.selectedOverlayClose} onPress={() => setSelectedRecordId('')}>
+                    <Ionicons name="close-outline" size={18} color={UI.peach} />
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.selectedOverlayDivider} />
+                <Text style={styles.selectedOverlayLabel}>이 기록에 포함된 노래</Text>
+                {selectedRecord.tracks.slice(0, 3).map((track) => (
+                  <View key={track.key} style={styles.selectedTrackRow}>
+                    <AlbumThumb uri={track.artworkUrl} color={track.albumColor} size={34} />
+                    <View style={styles.recordTextWrap}>
+                      <Text style={styles.recordTitle} numberOfLines={1}>{track.title}</Text>
+                      <Text style={styles.recordMeta} numberOfLines={1}>
+                        {track.artist} · {formatAge(track.recordedAt)}
+                      </Text>
+                    </View>
+                    {track.record?.track ? (
+                      <TouchableOpacity style={styles.selectedPlayButton} onPress={() => handlePlayRecord(track.record)}>
+                        <Ionicons name="play" size={12} color="#211817" />
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                ))}
+                {selectedRecord.tracks.length > 3 ? (
+                  <Text style={styles.selectedMoreText}>외 {selectedRecord.tracks.length - 3}곡 포함</Text>
+                ) : null}
+                {topTracks.length > 0 ? (
+                  <Text style={styles.selectedTopText} numberOfLines={1}>
+                    이 위치 TOP 3 · {topTracks.map((track) => track.title).join(' · ')}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
           </View>
 
           {currentTrack ? (
@@ -860,67 +1064,7 @@ export default function MusicMapScreen({ navigation }) {
           ) : null}
         </View>
 
-        {!effectiveIsRecording && selectedRecord ? (
-          <View style={styles.sheet}>
-            <View style={styles.handle} />
-            <View style={styles.sheetHeader}>
-              <View style={[styles.sheetIcon, { borderColor: selectedRecord.albumColor || UI.peach }]}>
-                <Ionicons
-                  name={selectedRecord.recordType === 'pin' ? 'location-outline' : 'git-branch-outline'}
-                  size={30}
-                  color={selectedRecord.albumColor || UI.peach}
-                />
-              </View>
-              <View style={styles.sheetTitleWrap}>
-                <Text style={styles.sheetTitle} numberOfLines={1}>
-                  {selectedRecord.placeName || '내 음악 위치'}
-                </Text>
-                <Text style={styles.sheetSub} numberOfLines={1}>
-                  {selectedRecord.tracks.length}곡 · {selectedRecord.recordType === 'pin' ? '한 지점 기록' : `${Math.round(selectedRecord.routeDistance)}m 이동`}
-                </Text>
-              </View>
-              <TouchableOpacity style={styles.refreshButton} onPress={() => setSelectedRecordId('')}>
-                <Ionicons name="close-outline" size={20} color={UI.peach} />
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.sectionLabel}>이 기록에 포함된 노래</Text>
-            {selectedRecord.tracks.map((track) => (
-              <View key={track.key} style={styles.recordRow}>
-                <AlbumThumb uri={track.artworkUrl} color={track.albumColor} size={42} />
-                <View style={styles.recordTextWrap}>
-                  <Text style={styles.recordTitle} numberOfLines={1}>{track.title}</Text>
-                  <Text style={styles.recordMeta} numberOfLines={1}>
-                    {track.artist} · {formatAge(track.recordedAt)}
-                  </Text>
-                </View>
-                {track.record?.track ? (
-                  <TouchableOpacity style={styles.smallPlayButton} onPress={() => handlePlayRecord(track.record)}>
-                    <Ionicons name="play" size={13} color="#211817" />
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-            ))}
-
-            {topTracks.length > 0 ? (
-              <>
-                <Text style={styles.sectionLabel}>이 위치 TOP 3</Text>
-                {topTracks.map((track, index) => (
-                  <View key={track.key} style={styles.topRow}>
-                    <Text style={styles.rank}>{index + 1}</Text>
-                    <AlbumThumb uri={track.artworkUrl} color={track.albumColor} size={42} />
-                    <View style={styles.topTextWrap}>
-                      <Text style={styles.topTitle} numberOfLines={1}>{track.title}</Text>
-                      <Text style={styles.topMeta} numberOfLines={1}>{track.artist} · {track.plays}회</Text>
-                    </View>
-                  </View>
-                ))}
-              </>
-            ) : null}
-
-            {error ? <Text style={styles.errorText}>{error}</Text> : null}
-          </View>
-        ) : null}
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
       </ScrollView>
     </SafeAreaView>
   );
@@ -1139,6 +1283,100 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     marginTop: 6,
+  },
+  selectedOverlay: {
+    position: 'absolute',
+    left: 14,
+    right: 14,
+    bottom: 14,
+    borderRadius: 20,
+    padding: 12,
+    backgroundColor: 'rgba(18, 15, 14, 0.96)',
+    borderWidth: 1,
+    borderColor: UI.borderStrong,
+  },
+  selectedOverlayHeader: {
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  selectedOverlayIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 201, 184, 0.08)',
+  },
+  selectedOverlayTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  selectedOverlayTitle: {
+    color: UI.peach,
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  selectedOverlayMeta: {
+    color: UI.textSoft,
+    fontSize: 11,
+    marginTop: 4,
+  },
+  selectedOverlayClose: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: UI.panelSoft,
+    borderWidth: 1,
+    borderColor: UI.border,
+  },
+  selectedOverlayDivider: {
+    height: 1,
+    marginVertical: 10,
+    backgroundColor: 'rgba(255, 201, 184, 0.12)',
+  },
+  selectedOverlayLabel: {
+    color: UI.text,
+    fontSize: 12,
+    fontWeight: '900',
+    marginBottom: 8,
+  },
+  selectedTrackRow: {
+    minHeight: 44,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: 14,
+    paddingHorizontal: 8,
+    marginBottom: 7,
+    backgroundColor: 'rgba(255, 241, 236, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.10)',
+    gap: 10,
+  },
+  selectedPlayButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: UI.peach,
+  },
+  selectedMoreText: {
+    color: UI.textMuted,
+    fontSize: 11,
+    fontWeight: '700',
+    textAlign: 'right',
+    marginTop: 1,
+  },
+  selectedTopText: {
+    color: UI.textMuted,
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 4,
   },
   nowPlaying: {
     marginHorizontal: 18,

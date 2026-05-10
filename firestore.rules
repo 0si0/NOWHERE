@@ -263,12 +263,14 @@ service cloud.firestore {
         'schemaVersion',
         'recordType',
         'source',
+        'sessionId',
         'track',
         'albumColor',
         'albumArtUrl',
         'placeName',
         'location',
         'routePoints',
+        'routeSegments',
         'playedDurationMs',
         'startedAt',
         'recordedAt',
@@ -279,12 +281,14 @@ service cloud.firestore {
         'schemaVersion',
         'recordType',
         'source',
+        'sessionId',
         'track',
         'albumColor',
         'albumArtUrl',
         'placeName',
         'location',
         'routePoints',
+        'routeSegments',
         'playedDurationMs',
         'startedAt',
         'recordedAt',
@@ -294,6 +298,7 @@ service cloud.firestore {
         data.schemaVersion is int &&
         (data.recordType == 'pin' || data.recordType == 'track') &&
         isShortString(data.source, 40) &&
+        isShortString(data.sessionId, 80) &&
         isPlayTargetMap(data.track) &&
         isShortString(data.albumColor, 12) &&
         isShortString(data.albumArtUrl, 500) &&
@@ -301,6 +306,8 @@ service cloud.firestore {
         isMusicMapLocation(data.location) &&
         data.routePoints is list &&
         data.routePoints.size() <= 160 &&
+        data.routeSegments is list &&
+        data.routeSegments.size() <= 120 &&
         isNumber(data.playedDurationMs) &&
         data.playedDurationMs >= 0 &&
         isShortString(data.startedAt, 64) &&

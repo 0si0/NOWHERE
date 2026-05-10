@@ -3,6 +3,8 @@ package com.nowhere.player
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import com.spotify.android.appremote.api.ConnectionParams
 import com.spotify.android.appremote.api.Connector
@@ -27,6 +29,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import kotlin.math.roundToInt
 
 class NowherePlayerModule : Module() {
   private var clientId: String = ""
@@ -169,6 +172,12 @@ class NowherePlayerModule : Module() {
 
     AsyncFunction("getPlaylistTracksAsync") Coroutine { playlistId: String, limit: Int ->
       return@Coroutine getSpotifyPlaylistTracks(playlistId, limit.coerceIn(1, 50))
+    }
+
+    AsyncFunction("extractAlbumColorAsync") Coroutine { albumArtUrl: String ->
+      return@Coroutine withContext(Dispatchers.IO) {
+        extractDominantAlbumColor(albumArtUrl)
+      }
     }
 
     AsyncFunction("prepareAutoPlayAsync") { options: Map<String, Any?>, promise: Promise ->
@@ -877,6 +886,71 @@ class NowherePlayerModule : Module() {
 
   private fun emitState() {
     sendEvent("onPlaybackStateChanged", currentState())
+  }
+
+  private fun extractDominantAlbumColor(albumArtUrl: String): String {
+    if (albumArtUrl.isBlank()) {
+      throw IllegalArgumentException("Album artwork URL is invalid.")
+    }
+
+    val connection = (URL(albumArtUrl).openConnection() as HttpURLConnection).apply {
+      connectTimeout = 5000
+      readTimeout = 7000
+      requestMethod = "GET"
+    }
+
+    connection.inputStream.use { stream ->
+      val bitmap = BitmapFactory.decodeStream(stream)
+        ?: throw IllegalArgumentException("Album artwork could not be decoded.")
+      val scaled = Bitmap.createScaledBitmap(bitmap, 32, 32, true)
+      if (scaled != bitmap) {
+        bitmap.recycle()
+      }
+
+      val buckets = mutableMapOf<String, IntArray>()
+      var redTotal = 0
+      var greenTotal = 0
+      var blueTotal = 0
+      var averageCount = 0
+
+      for (y in 0 until scaled.height) {
+        for (x in 0 until scaled.width) {
+          val pixel = scaled.getPixel(x, y)
+          val alpha = android.graphics.Color.alpha(pixel)
+          if (alpha < 180) continue
+          val red = android.graphics.Color.red(pixel)
+          val green = android.graphics.Color.green(pixel)
+          val blue = android.graphics.Color.blue(pixel)
+
+          redTotal += red
+          greenTotal += green
+          blueTotal += blue
+          averageCount += 1
+
+          val luma = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
+          if (luma < 24 || luma > 238) continue
+
+          val bucketRed = ((red / 24.0).roundToInt() * 24).coerceAtMost(255)
+          val bucketGreen = ((green / 24.0).roundToInt() * 24).coerceAtMost(255)
+          val bucketBlue = ((blue / 24.0).roundToInt() * 24).coerceAtMost(255)
+          val key = "$bucketRed,$bucketGreen,$bucketBlue"
+          val bucket = buckets[key] ?: intArrayOf(0, bucketRed, bucketGreen, bucketBlue)
+          bucket[0] += 1
+          buckets[key] = bucket
+        }
+      }
+
+      scaled.recycle()
+
+      buckets.values.maxByOrNull { it[0] }?.let { dominant ->
+        return String.format("#%02X%02X%02X", dominant[1], dominant[2], dominant[3])
+      }
+
+      if (averageCount <= 0) {
+        throw IllegalArgumentException("Album artwork did not contain usable pixels.")
+      }
+      return String.format("#%02X%02X%02X", redTotal / averageCount, greenTotal / averageCount, blueTotal / averageCount)
+    }
   }
 
   companion object {

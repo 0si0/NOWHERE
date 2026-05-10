@@ -6,6 +6,7 @@ import {
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocs,
@@ -40,6 +41,8 @@ import {
   buildUserProfileDocument,
   sanitizeConsentInput,
   sanitizeListeningEventInput,
+  sanitizeMusicMapPublicRecordInput,
+  sanitizeMusicMapRecordInput,
   sanitizePlayRecordInput,
   sanitizeSavedPlaceInput,
   sanitizeVibePayload,
@@ -50,8 +53,12 @@ const SESSION_ID_KEY = '@nowhere/session-id';
 const LOCAL_APP_USER_ID_KEY = '@nowhere/local-app-user-id';
 const LOCAL_SAVED_PLACES_KEY = '@nowhere/local-saved-places';
 const LOCAL_LISTENING_EVENTS_KEY = '@nowhere/local-listening-events';
+const LOCAL_MUSIC_MAP_RECORDS_KEY = '@nowhere/local-music-map-records';
+const LOCAL_MUSIC_MAP_PUBLIC_RECORDS_KEY = '@nowhere/local-music-map-public-records';
 const LOCAL_USER_PREFIX = 'local-user-';
 const MAX_LOCAL_LISTENING_EVENTS = 500;
+const MAX_LOCAL_MUSIC_MAP_RECORDS = 800;
+const MUSIC_MAP_RECORD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function getComparableTimestamp(value) {
   if (!value) return 0;
@@ -63,9 +70,27 @@ function getComparableTimestamp(value) {
   return Number.isNaN(asDate.getTime()) ? 0 : asDate.getTime();
 }
 
+function getMusicMapRecordCutoffIso() {
+  return new Date(Date.now() - MUSIC_MAP_RECORD_TTL_MS).toISOString();
+}
+
+function isFreshMusicMapRecord(record = {}) {
+  const timestamp = getComparableTimestamp(record.recordedAt || record.createdAt || record.startedAt);
+  return timestamp > 0 && timestamp >= Date.now() - MUSIC_MAP_RECORD_TTL_MS;
+}
+
 function sortByUpdatedAtDescending(items) {
   return [...items].sort(
     (left, right) => getComparableTimestamp(right.updatedAt) - getComparableTimestamp(left.updatedAt)
+  );
+}
+
+function sortByRecordedAtDescending(items) {
+  return [...items].sort(
+    (left, right) => (
+      getComparableTimestamp(right.recordedAt || right.createdAt) -
+      getComparableTimestamp(left.recordedAt || left.createdAt)
+    )
   );
 }
 
@@ -106,6 +131,58 @@ async function readLocalListeningEvents() {
 
 async function writeLocalListeningEvents(events) {
   await AsyncStorage.setItem(LOCAL_LISTENING_EVENTS_KEY, JSON.stringify(events.slice(0, MAX_LOCAL_LISTENING_EVENTS)));
+}
+
+async function readLocalMusicMapRecords() {
+  const raw = await AsyncStorage.getItem(LOCAL_MUSIC_MAP_RECORDS_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    await AsyncStorage.removeItem(LOCAL_MUSIC_MAP_RECORDS_KEY);
+    return [];
+  }
+}
+
+async function writeLocalMusicMapRecords(records) {
+  await AsyncStorage.setItem(
+    LOCAL_MUSIC_MAP_RECORDS_KEY,
+    JSON.stringify(records.filter(isFreshMusicMapRecord).slice(0, MAX_LOCAL_MUSIC_MAP_RECORDS))
+  );
+}
+
+async function pruneRemoteMusicMapRecords(db, userId, cutoffIso) {
+  const oldRecordsQuery = query(
+    getMusicMapRecordsCollection(db, userId),
+    where('recordedAt', '<', cutoffIso),
+    orderBy('recordedAt', 'asc'),
+    limit(50)
+  );
+  const snapshot = await getDocs(oldRecordsQuery);
+  await Promise.all(snapshot.docs.map((item) => deleteDoc(item.ref)));
+}
+
+async function readLocalMusicMapPublicRecords() {
+  const raw = await AsyncStorage.getItem(LOCAL_MUSIC_MAP_PUBLIC_RECORDS_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    await AsyncStorage.removeItem(LOCAL_MUSIC_MAP_PUBLIC_RECORDS_KEY);
+    return [];
+  }
+}
+
+async function writeLocalMusicMapPublicRecords(records) {
+  await AsyncStorage.setItem(LOCAL_MUSIC_MAP_PUBLIC_RECORDS_KEY, JSON.stringify(records.slice(0, MAX_LOCAL_MUSIC_MAP_RECORDS)));
 }
 
 function isLocalAppUserId(userId) {
@@ -195,6 +272,14 @@ function getPlayHistoryCollection(db, userId) {
 
 function getListeningEventsCollection(db, userId) {
   return collection(db, 'users', userId, 'listeningEvents');
+}
+
+function getMusicMapRecordsCollection(db, userId) {
+  return collection(db, 'users', userId, 'musicMapRecords');
+}
+
+function getMusicMapPublicRecordsCollection(db) {
+  return collection(db, 'musicMapPublicRecords');
 }
 
 function getConsentCollection(db, userId) {
@@ -618,6 +703,176 @@ export async function getListeningEvents(userId, maxRecords = 200) {
     id: item.id,
     ...item.data(),
   }));
+}
+
+async function publishMusicMapPublicRecord(record) {
+  const publicPayload = sanitizeMusicMapPublicRecordInput({
+    ...record,
+    latitude: record.location?.latitude,
+    longitude: record.location?.longitude,
+  });
+  const localPayload = {
+    id: `public-map-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    ...publicPayload,
+    createdAt: new Date().toISOString(),
+  };
+
+  const localRecords = await readLocalMusicMapPublicRecords();
+  await writeLocalMusicMapPublicRecords([localPayload, ...localRecords]);
+
+  if (!isFirebaseConfiguredInClient()) {
+    return localPayload;
+  }
+
+  try {
+    const { auth, db } = assertFirebaseConfigured();
+    if (!auth.currentUser) {
+      return localPayload;
+    }
+
+    const docRef = await addDoc(getMusicMapPublicRecordsCollection(db), {
+      ...publicPayload,
+      createdAt: serverTimestamp(),
+    });
+    return { id: docRef.id, ...publicPayload };
+  } catch (error) {
+    return localPayload;
+  }
+}
+
+export async function saveMusicMapRecord(input) {
+  const resolvedUserId = input.userId || await getOrCreateAppUserId();
+  const sanitized = sanitizeMusicMapRecordInput({
+    ...input,
+    userId: resolvedUserId,
+  });
+  const localPayload = {
+    id: `music-map-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    ...sanitized,
+    createdAt: new Date().toISOString(),
+  };
+
+  const publishPublic = input.publishPublic !== false;
+
+  if (!isFirebaseConfiguredInClient()) {
+    const records = await readLocalMusicMapRecords();
+    await writeLocalMusicMapRecords([localPayload, ...records]);
+    if (publishPublic) {
+      await publishMusicMapPublicRecord(sanitized);
+    }
+    return localPayload;
+  }
+
+  const { auth, db } = assertFirebaseConfigured();
+  if (shouldUseLocalSavedPlaces(auth, sanitized.userId)) {
+    const records = await readLocalMusicMapRecords();
+    await writeLocalMusicMapRecords([localPayload, ...records]);
+    if (publishPublic) {
+      await publishMusicMapPublicRecord(sanitized);
+    }
+    return localPayload;
+  }
+
+  const userId = assertAuthenticatedUser(auth, sanitized.userId);
+  try {
+    const docRef = await addDoc(getMusicMapRecordsCollection(db, userId), {
+      ...sanitized,
+      createdAt: serverTimestamp(),
+    });
+    const savedRecord = { id: docRef.id, ...sanitized };
+    if (publishPublic) {
+      await publishMusicMapPublicRecord(savedRecord);
+    }
+    return savedRecord;
+  } catch (error) {
+    if (isPermissionDeniedError(error)) {
+      const records = await readLocalMusicMapRecords();
+      await writeLocalMusicMapRecords([{
+        ...localPayload,
+        remoteError: 'permission-denied',
+        syncStatus: 'localOnly',
+      }, ...records]);
+      if (publishPublic) {
+        await publishMusicMapPublicRecord(sanitized);
+      }
+      return localPayload;
+    }
+    throw error;
+  }
+}
+
+export async function getMusicMapRecords(userId, maxRecords = 200) {
+  const ownerId = userId || await getOrCreateAppUserId();
+  const cutoffIso = getMusicMapRecordCutoffIso();
+
+  if (!isFirebaseConfiguredInClient()) {
+    const records = await readLocalMusicMapRecords();
+    const freshRecords = records.filter((record) => record.userId === ownerId && isFreshMusicMapRecord(record));
+    if (freshRecords.length !== records.length) {
+      await writeLocalMusicMapRecords(records);
+    }
+    return sortByRecordedAtDescending(freshRecords).slice(0, maxRecords);
+  }
+
+  const { auth, db } = assertFirebaseConfigured();
+  if (shouldUseLocalSavedPlaces(auth, ownerId)) {
+    const records = await readLocalMusicMapRecords();
+    const freshRecords = records.filter((record) => record.userId === ownerId && isFreshMusicMapRecord(record));
+    if (freshRecords.length !== records.length) {
+      await writeLocalMusicMapRecords(records);
+    }
+    return sortByRecordedAtDescending(freshRecords).slice(0, maxRecords);
+  }
+
+  const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
+  await pruneRemoteMusicMapRecords(db, validatedOwnerId, cutoffIso).catch(() => {});
+  const recordsQuery = query(
+    getMusicMapRecordsCollection(db, validatedOwnerId),
+    where('recordedAt', '>=', cutoffIso),
+    orderBy('recordedAt', 'desc'),
+    limit(maxRecords)
+  );
+  const snapshot = await getDocs(recordsQuery);
+
+  const remoteRecords = snapshot.docs.map((item) => ({
+    id: item.id,
+    ...item.data(),
+  }));
+  const localRecords = await readLocalMusicMapRecords();
+  return sortByRecordedAtDescending([
+    ...remoteRecords,
+    ...localRecords.filter((record) => record.userId === validatedOwnerId && isFreshMusicMapRecord(record)),
+  ]).slice(0, maxRecords);
+}
+
+export async function getMusicMapPublicRecords(maxRecords = 200) {
+  const localRecords = await readLocalMusicMapPublicRecords();
+
+  if (!isFirebaseConfiguredInClient()) {
+    return sortByRecordedAtDescending(localRecords).slice(0, maxRecords);
+  }
+
+  try {
+    const { auth, db } = assertFirebaseConfigured();
+    if (!auth.currentUser) {
+      return sortByRecordedAtDescending(localRecords).slice(0, maxRecords);
+    }
+
+    const recordsQuery = query(
+      getMusicMapPublicRecordsCollection(db),
+      orderBy('recordedAt', 'desc'),
+      limit(maxRecords)
+    );
+    const snapshot = await getDocs(recordsQuery);
+    const remoteRecords = snapshot.docs.map((item) => ({
+      id: item.id,
+      ...item.data(),
+      anonymous: true,
+    }));
+    return sortByRecordedAtDescending([...remoteRecords, ...localRecords]).slice(0, maxRecords);
+  } catch (error) {
+    return sortByRecordedAtDescending(localRecords).slice(0, maxRecords);
+  }
 }
 
 export async function getRecentPlayHistory(userId, maxRecords = 25) {

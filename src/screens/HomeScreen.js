@@ -242,6 +242,7 @@ export default function HomeScreen({ navigation }) {
     hasBackgroundPermission,
     isLocating,
     locationError,
+    foregroundPermission,
     autoPlayModeEnabled,
     setAutoPlayModeEnabled,
     prepareAutoPlayMode,
@@ -263,6 +264,7 @@ export default function HomeScreen({ navigation }) {
   const startupRecommendationRefreshRef = useRef(false);
   const seenRecommendationKeysRef = useRef([]);
   const spotifyEnsureInFlightRef = useRef(false);
+  const locationPromptShownRef = useRef(false);
 
   const isTiny = height < 740;
   const isCompact = height < 820;
@@ -273,6 +275,19 @@ export default function HomeScreen({ navigation }) {
   const wheelImageSource = selectedTrack.isChallenge
     ? CHALLENGE_MARK
     : buildArtworkSource(selectedTrack.artworkUrl);
+
+  useEffect(() => {
+    if (locationPromptShownRef.current || foregroundPermission !== 'undetermined') {
+      return;
+    }
+
+    locationPromptShownRef.current = true;
+    const timer = setTimeout(() => {
+      requestPermissions().catch(() => {});
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, [foregroundPermission, requestPermissions]);
   const titleFontSize = fitTitleSize(selectedTrack.title, isCompact);
   const isAutoPlayVisibleOn = autoPlayModeEnabled && hasBackgroundPermission;
 

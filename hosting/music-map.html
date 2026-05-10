@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>NOWHERE Music Map</title>
+  <style>
+    html, body, #map {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background: #05070A;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    #map {
+      filter: none;
+    }
+    .shade {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      pointer-events: none;
+      display: none;
+    }
+    .center {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      box-sizing: border-box;
+      color: #FFF1EC;
+      text-align: center;
+      background: #05070A;
+    }
+    .spinner {
+      width: 26px;
+      height: 26px;
+      border: 3px solid rgba(255,255,255,0.18);
+      border-top-color: #FFC8B8;
+      border-radius: 50%;
+      margin: 0 auto 12px;
+      animation: spin 0.8s linear infinite;
+    }
+    .error {
+      font-size: 13px;
+      line-height: 19px;
+      color: #FFB4B4;
+    }
+    .pin {
+      width: 24px;
+      height: 24px;
+      border-radius: 18px 18px 18px 4px;
+      transform: rotate(-45deg);
+      border: 2px solid rgba(255, 241, 236, 0.84);
+      box-shadow: 0 0 18px currentColor, 0 6px 16px rgba(0, 0, 0, 0.4);
+      background: currentColor;
+      box-sizing: border-box;
+    }
+    .pin::after {
+      content: '';
+      position: absolute;
+      left: 6px;
+      top: 6px;
+      width: 8px;
+      height: 8px;
+      border-radius: 99px;
+      background: rgba(5, 7, 10, 0.76);
+      border: 1px solid rgba(255, 241, 236, 0.72);
+    }
+    .pin.selected {
+      width: 32px;
+      height: 32px;
+      border-width: 3px;
+      box-shadow: 0 0 28px currentColor, 0 0 0 14px rgba(255, 201, 184, 0.13);
+    }
+    .pin.selected::after {
+      left: 9px;
+      top: 9px;
+    }
+    .route-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 99px;
+      border: 2px solid rgba(255, 241, 236, 0.72);
+      background: currentColor;
+      box-shadow: 0 0 18px currentColor;
+    }
+    .route-dot.live {
+      width: 18px;
+      height: 18px;
+      border: 3px solid rgba(5, 7, 10, 0.55);
+      box-shadow: 0 0 0 8px rgba(124, 255, 178, 0.22), 0 0 22px currentColor;
+    }
+    .pin.start-pin {
+      width: 22px;
+      height: 22px;
+      box-shadow: 0 0 18px rgba(124, 255, 178, 0.58), 0 6px 16px rgba(0, 0, 0, 0.38);
+    }
+    .pin.end-pin {
+      width: 26px;
+      height: 26px;
+      box-shadow: 0 0 18px rgba(255, 201, 184, 0.58), 0 6px 16px rgba(0, 0, 0, 0.38);
+    }
+    .pin.session-pin {
+      width: 28px;
+      height: 28px;
+      box-shadow: 0 0 24px currentColor, 0 0 0 10px rgba(255, 201, 184, 0.12);
+    }
+    .song-change-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 99px;
+      border: 2px solid rgba(5, 7, 10, 0.68);
+      background: currentColor;
+      box-shadow: 0 0 12px currentColor;
+    }
+    .label {
+      padding: 7px 11px;
+      border-radius: 999px;
+      color: #FFF1EC;
+      font-size: 12px;
+      line-height: 14px;
+      background: rgba(17, 14, 13, 0.86);
+      border: 1px solid rgba(255, 201, 184, 0.42);
+      box-shadow: 0 8px 18px rgba(0, 0, 0, 0.35);
+      white-space: nowrap;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="shade"></div>
+  <div id="loading" class="center">
+    <div>
+      <div class="spinner"></div>
+      <div>Kakao 뮤직지도를 불러오는 중...</div>
+    </div>
+  </div>
+  <script>
+    var params = new URLSearchParams(window.location.search);
+    var appkey = params.get('appkey') || '';
+    var latitude = Number(params.get('lat')) || 37.5665;
+    var longitude = Number(params.get('lng')) || 126.978;
+    var map;
+    var overlays = [];
+    var polylines = [];
+    var latestPayload = { records: [], mode: 'pin', selectedRecordId: '' };
+
+    function post(payload) {
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+      }
+    }
+
+    function showError(message) {
+      var loading = document.getElementById('loading');
+      if (loading) {
+        loading.innerHTML = '<div class="error">' + message + '<br />Kakao Developers에서 카카오맵 사용 설정과 JavaScript SDK 도메인을 확인하세요.</div>';
+      }
+      post({ type: 'error', message: message });
+    }
+
+    function clearMap() {
+      overlays.forEach(function(overlay) { overlay.setMap(null); });
+      polylines.forEach(function(polyline) { polyline.setMap(null); });
+      overlays = [];
+      polylines = [];
+    }
+
+    function selectRecord(record) {
+      post({ type: 'recordPress', id: record.id });
+    }
+
+    function getRecordLocation(record) {
+      if (record.isLive && record.currentLocation &&
+        typeof record.currentLocation.latitude === 'number' &&
+        typeof record.currentLocation.longitude === 'number') {
+        return new kakao.maps.LatLng(record.currentLocation.latitude, record.currentLocation.longitude);
+      }
+      var location = record.location || {};
+      if (typeof location.latitude === 'number' && typeof location.longitude === 'number') {
+        return new kakao.maps.LatLng(location.latitude, location.longitude);
+      }
+      var points = record.routePoints || [];
+      var first = points[0];
+      if (first && typeof first.latitude === 'number' && typeof first.longitude === 'number') {
+        return new kakao.maps.LatLng(first.latitude, first.longitude);
+      }
+      return null;
+    }
+
+    function createOverlay(record, position, className, colorOverride) {
+      var color = colorOverride || record.albumColor || '#FFC8B8';
+      var node = document.createElement('button');
+      node.type = 'button';
+      node.className = className;
+      node.style.color = color;
+      node.setAttribute('aria-label', record.track?.title || 'music map record');
+      node.onclick = function(event) {
+        if (event && typeof event.stopPropagation === 'function') {
+          event.stopPropagation();
+        }
+        selectRecord(record);
+      };
+      var overlay = new kakao.maps.CustomOverlay({
+        position: position,
+        content: node,
+        yAnchor: className.indexOf('pin') >= 0 ? 1 : 0.5,
+        zIndex: record.id === latestPayload.selectedRecordId ? 30 : 10
+      });
+      overlay.setMap(map);
+      overlays.push(overlay);
+    }
+
+    function pointToLatLng(point) {
+      if (point && typeof point.latitude === 'number' && typeof point.longitude === 'number') {
+        return new kakao.maps.LatLng(point.latitude, point.longitude);
+      }
+      return null;
+    }
+
+    function createLabel(record, position) {
+      return;
+    }
+
+    function renderPin(record) {
+      var position = getRecordLocation(record);
+      if (!position) return;
+      createOverlay(record, position, record.id === latestPayload.selectedRecordId ? 'pin selected' : 'pin');
+      createLabel(record, position);
+    }
+
+    function renderTrack(record) {
+      var livePosition = getRecordLocation(record);
+      var rawPoints = (record.routePoints || [])
+        .filter(function(point) {
+          return typeof point.latitude === 'number' && typeof point.longitude === 'number';
+        });
+      var points = rawPoints.map(function(point) {
+        return new kakao.maps.LatLng(point.latitude, point.longitude);
+      });
+
+      function renderTrackMarkers(lastPosition) {
+        var startPosition = pointToLatLng(record.startLocation) || points[0] || lastPosition;
+        var endPosition = pointToLatLng(record.endLocation) || (!record.isLive ? lastPosition : null);
+
+        if (record.isLive) {
+          if (points.length >= 2 && startPosition) {
+            createOverlay(record, startPosition, 'pin start-pin', '#7CFFB2');
+          }
+          if (lastPosition) {
+            createOverlay(record, lastPosition, 'route-dot live');
+          }
+        } else if (record.endpointPinsMerged || !endPosition) {
+          if (lastPosition || startPosition) {
+            createOverlay(record, lastPosition || startPosition, record.id === latestPayload.selectedRecordId ? 'pin session-pin selected' : 'pin session-pin');
+          }
+        } else {
+          if (startPosition) {
+            createOverlay(record, startPosition, 'pin start-pin', '#7CFFB2');
+          }
+          if (endPosition) {
+            createOverlay(record, endPosition, record.id === latestPayload.selectedRecordId ? 'pin end-pin selected' : 'pin end-pin', '#FFC8B8');
+          }
+        }
+
+        (record.trackChangeMarkers || []).forEach(function(marker) {
+          var markerPosition = pointToLatLng(marker.location || marker.point);
+          if (markerPosition) {
+            createOverlay(record, markerPosition, 'song-change-dot', marker.albumColor || record.albumColor || '#FFC8B8');
+          }
+        });
+      }
+
+      if (points.length >= 2) {
+        var polyline = new kakao.maps.Polyline({
+          map: map,
+          path: points,
+          strokeWeight: record.isLive ? 7 : record.id === latestPayload.selectedRecordId ? 8 : 5,
+          strokeColor: record.albumColor || '#FFC8B8',
+          strokeOpacity: record.isLive ? 0.96 : record.id === latestPayload.selectedRecordId ? 0.98 : 0.72,
+          strokeStyle: 'solid',
+          zIndex: record.isLive ? 28 : record.id === latestPayload.selectedRecordId ? 20 : 8
+        });
+        kakao.maps.event.addListener(polyline, 'click', function() {
+          selectRecord(record);
+        });
+        polylines.push(polyline);
+        var pointPosition = record.isLive && livePosition ? livePosition : points[points.length - 1];
+        renderTrackMarkers(pointPosition);
+        return;
+      }
+
+      if (points.length === 1) {
+        var singlePosition = record.isLive && livePosition ? livePosition : points[0];
+        renderTrackMarkers(singlePosition);
+      }
+    }
+
+    function fitRecords(records) {
+      var bounds = new kakao.maps.LatLngBounds();
+      var count = 0;
+      function extendPoint(point) {
+        if (point && typeof point.latitude === 'number' && typeof point.longitude === 'number') {
+          bounds.extend(new kakao.maps.LatLng(point.latitude, point.longitude));
+          count += 1;
+        }
+      }
+      records.forEach(function(record) {
+        var position = getRecordLocation(record);
+        if (position) {
+          bounds.extend(position);
+          count += 1;
+        }
+        extendPoint(record.startLocation);
+        extendPoint(record.endLocation);
+        extendPoint(record.currentLocation);
+        (record.routePoints || []).forEach(extendPoint);
+      });
+      if (count > 1) {
+        map.setBounds(bounds, 46, 46, 46, 46);
+      } else if (count === 1) {
+        map.panTo(getRecordLocation(records[0]));
+      }
+    }
+
+    window.nowhereSetMusicMap = function(payload) {
+      if (!window.kakao || !map) {
+        latestPayload = payload || latestPayload;
+        return;
+      }
+      latestPayload = payload || latestPayload;
+      var records = latestPayload.records || [];
+      clearMap();
+      records.forEach(function(record) {
+        if (record.recordType === 'pin') {
+          renderPin(record);
+        } else if (latestPayload.mode === 'track') {
+          renderTrack(record);
+        } else {
+          renderPin(record);
+        }
+      });
+      if (latestPayload.shouldFit !== false) {
+        fitRecords(records);
+      }
+    };
+
+    function initMap() {
+      if (!window.kakao || !window.kakao.maps) {
+        showError('Kakao 지도 SDK가 로드되지 않았습니다.');
+        return;
+      }
+
+      kakao.maps.load(function() {
+        var center = new kakao.maps.LatLng(latitude, longitude);
+        map = new kakao.maps.Map(document.getElementById('map'), {
+          center: center,
+          level: 4
+        });
+        kakao.maps.event.addListener(map, 'click', function() {
+          post({ type: 'recordPress', id: '' });
+        });
+        var loading = document.getElementById('loading');
+        if (loading) {
+          loading.style.display = 'none';
+        }
+        post({ type: 'ready' });
+        window.nowhereSetMusicMap(latestPayload);
+      });
+    }
+
+    if (!appkey) {
+      showError('Kakao JavaScript 키가 전달되지 않았습니다.');
+    } else {
+      var script = document.createElement('script');
+      script.src = 'https://dapi.kakao.com/v2/maps/sdk.js?appkey=' + encodeURIComponent(appkey) + '&autoload=false';
+      script.onload = initMap;
+      script.onerror = function() {
+        showError('Kakao 지도 SDK 파일을 불러오지 못했습니다.');
+      };
+      document.head.appendChild(script);
+    }
+  </script>
+</body>
+</html>

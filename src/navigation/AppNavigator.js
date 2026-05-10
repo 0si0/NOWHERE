@@ -12,14 +12,18 @@ import HomeScreen from '../screens/HomeScreen';
 import AuthGateScreen from '../screens/AuthGateScreen';
 import SpotifyPermissionScreen from '../screens/SpotifyPermissionScreen';
 import RecommendScreen from '../screens/RecommendScreen';
-import MusicMapScreen from '../screens/MusicMapScreen';
 import VibeScreen from '../screens/VibeScreen';
 import PlaceSetupScreen from '../screens/PlaceSetupScreen';
-import { isNowhereOnboardingComplete } from '../services/onboardingService';
+import { isNowhereOnboardingComplete, isSpotifyOnboardingComplete } from '../services/onboardingService';
 import { musicPlayerService } from '../services/musicPlayerService';
 import { useSession } from '../contexts/SessionContext';
 
 const Stack = createNativeStackNavigator();
+
+function MusicMapRoute(props) {
+  const MusicMapScreen = require('../screens/MusicMapScreen').default;
+  return <MusicMapScreen {...props} />;
+}
 
 function RootStack() {
   return (
@@ -28,7 +32,7 @@ function RootStack() {
       <Stack.Screen name="Recommend" component={RecommendScreen} options={{ presentation: 'modal' }} />
       <Stack.Screen name="PlaceSetup" component={PlaceSetupScreen} options={{ presentation: 'modal' }} />
       <Stack.Screen name="Vibe" component={VibeScreen} options={{ presentation: 'modal' }} />
-      <Stack.Screen name="MusicMap" component={MusicMapScreen} options={{ presentation: 'modal' }} />
+      <Stack.Screen name="MusicMap" component={MusicMapRoute} options={{ presentation: 'modal' }} />
     </Stack.Navigator>
   );
 }
@@ -47,9 +51,10 @@ function AppEntry() {
         return { accountReady: false, spotifyAuthorized: false };
       }
 
+      const spotifyOnboardingComplete = await isSpotifyOnboardingComplete();
       const state = await musicPlayerService.configure().catch(() => null);
       const authorized = state?.authorizationStatus === 'authorized' || state?.isAuthorized === true;
-      return { accountReady, spotifyAuthorized: authorized };
+      return { accountReady, spotifyAuthorized: spotifyOnboardingComplete || authorized };
     }
 
     checkOnboarding()

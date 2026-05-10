@@ -38,6 +38,23 @@ function cleanLongitude(value) {
   return Number(value.toFixed(6));
 }
 
+function cleanDisplayLatitude(value) {
+  return Number(cleanLatitude(value).toFixed(3));
+}
+
+function cleanDisplayLongitude(value) {
+  return Number(cleanLongitude(value).toFixed(3));
+}
+
+function cleanColor(value, fallback = '#FFC8B8') {
+  const color = typeof value === 'string' ? value.trim() : '';
+  return /^#[0-9A-Fa-f]{6}$/.test(color) ? color : fallback;
+}
+
+function cleanPositiveInteger(value, fallback = 0) {
+  return isNumeric(value) && value >= 0 ? Math.round(value) : fallback;
+}
+
 function cleanRadius(value) {
   invariant(RADIUS_OPTIONS.includes(value), '허용되지 않은 반경입니다.');
   return value;
@@ -88,6 +105,20 @@ function cleanPlayTarget(rawTarget = {}) {
     artworkUrl,
     durationMs,
   };
+}
+
+function cleanRoutePoints(routePoints = []) {
+  invariant(Array.isArray(routePoints), '뮤직지도 이동 경로 형식이 올바르지 않습니다.');
+  invariant(routePoints.length <= 160, '뮤직지도 이동 경로는 최대 160개 지점까지 저장할 수 있습니다.');
+
+  return routePoints
+    .filter((point) => isNumeric(point?.latitude) && isNumeric(point?.longitude))
+    .map((point) => ({
+      latitude: cleanLatitude(point.latitude),
+      longitude: cleanLongitude(point.longitude),
+      recordedAt: cleanOptionalText(point.recordedAt, '경로 기록 시각', 64),
+      segmentIndex: Number.isInteger(point.segmentIndex) && point.segmentIndex >= 0 ? point.segmentIndex : 0,
+    }));
 }
 
 function cleanWeatherRules(weatherRules = []) {
@@ -245,6 +276,88 @@ export function sanitizeListeningEventInput(input) {
       request: cleanOptionalText(input.challenge?.request, 'Challenge 추가 요청', 30),
     },
     occurredAt,
+  };
+}
+
+export function sanitizeMusicMapRecordInput(input) {
+  const latitude = cleanLatitude(input.latitude);
+  const longitude = cleanLongitude(input.longitude);
+  const track = cleanPlayTarget(input.track || input.playTarget || input);
+  invariant(track, '뮤직지도 기록에는 곡 정보가 필요합니다.');
+
+  const recordedAt = typeof input.recordedAt === 'string' && input.recordedAt
+    ? input.recordedAt
+    : new Date().toISOString();
+  const startedAt = typeof input.startedAt === 'string' && input.startedAt
+    ? input.startedAt
+    : recordedAt;
+
+  return {
+    userId: cleanText(input.userId, '사용자 ID', { max: 128 }),
+    schemaVersion: Number.isInteger(input.schemaVersion) ? input.schemaVersion : 1,
+    recordType: input.recordType === 'track' ? 'track' : 'pin',
+    source: cleanOptionalText(input.source, '기록 소스', 40) || 'spotify-playback',
+    sessionId: cleanOptionalText(input.sessionId, '세션 ID', 80),
+    track,
+    albumColor: cleanColor(input.albumColor || track.color),
+    albumArtUrl: cleanOptionalText(input.albumArtUrl || track.artworkUrl, '앨범 이미지 URL', 500),
+    placeName: cleanOptionalText(input.placeName, '장소 이름', 80),
+    location: {
+      latitude,
+      longitude,
+      geohash: encodeGeohash(latitude, longitude),
+    },
+    routePoints: cleanRoutePoints(input.routePoints),
+    playedDurationMs: cleanPositiveInteger(input.playedDurationMs),
+    startedAt,
+    recordedAt,
+  };
+}
+
+export function sanitizeMusicMapPublicRecordInput(input) {
+  const latitude = cleanDisplayLatitude(input.latitude);
+  const longitude = cleanDisplayLongitude(input.longitude);
+  const track = cleanPlayTarget(input.track || input.playTarget || input);
+  invariant(track, '뮤직지도 전체 기록에는 곡 정보가 필요합니다.');
+
+  const recordedAt = typeof input.recordedAt === 'string' && input.recordedAt
+    ? input.recordedAt
+    : new Date().toISOString();
+  const startedAt = typeof input.startedAt === 'string' && input.startedAt
+    ? input.startedAt
+    : recordedAt;
+
+  return {
+    schemaVersion: Number.isInteger(input.schemaVersion) ? input.schemaVersion : 1,
+    recordType: input.recordType === 'track' ? 'track' : 'pin',
+    source: cleanOptionalText(input.source, '기록 소스', 40) || 'spotify-playback',
+    track: {
+      type: track.type,
+      provider: track.provider,
+      id: track.id,
+      spotifyUri: '',
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      artworkUrl: track.artworkUrl,
+      durationMs: track.durationMs,
+    },
+    albumColor: cleanColor(input.albumColor || track.color),
+    albumArtUrl: cleanOptionalText(input.albumArtUrl || track.artworkUrl, '앨범 이미지 URL', 500),
+    placeName: cleanOptionalText(input.placeName, '장소 이름', 80),
+    location: {
+      latitude,
+      longitude,
+      geohash: encodeGeohash(latitude, longitude),
+    },
+    routePoints: cleanRoutePoints(input.routePoints).map((point) => ({
+      ...point,
+      latitude: Number(point.latitude.toFixed(3)),
+      longitude: Number(point.longitude.toFixed(3)),
+    })),
+    playedDurationMs: cleanPositiveInteger(input.playedDurationMs),
+    startedAt,
+    recordedAt,
   };
 }
 

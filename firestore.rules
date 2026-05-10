@@ -245,6 +245,115 @@ service cloud.firestore {
         isShortString(data.occurredAt, 64);
     }
 
+    function isMusicMapLocation(data) {
+      return data.keys().hasAll(['latitude', 'longitude', 'geohash']) &&
+        data.keys().hasOnly(['latitude', 'longitude', 'geohash']) &&
+        isNumber(data.latitude) &&
+        isNumber(data.longitude) &&
+        data.latitude >= -90 &&
+        data.latitude <= 90 &&
+        data.longitude >= -180 &&
+        data.longitude <= 180 &&
+        isShortString(data.geohash, 12);
+    }
+
+    function isMusicMapRecord(data, userId) {
+      return data.keys().hasAll([
+        'userId',
+        'schemaVersion',
+        'recordType',
+        'source',
+        'track',
+        'albumColor',
+        'albumArtUrl',
+        'placeName',
+        'location',
+        'routePoints',
+        'playedDurationMs',
+        'startedAt',
+        'recordedAt',
+        'createdAt'
+      ]) &&
+        data.keys().hasOnly([
+        'userId',
+        'schemaVersion',
+        'recordType',
+        'source',
+        'track',
+        'albumColor',
+        'albumArtUrl',
+        'placeName',
+        'location',
+        'routePoints',
+        'playedDurationMs',
+        'startedAt',
+        'recordedAt',
+        'createdAt'
+      ]) &&
+        data.userId == userId &&
+        data.schemaVersion is int &&
+        (data.recordType == 'pin' || data.recordType == 'track') &&
+        isShortString(data.source, 40) &&
+        isPlayTargetMap(data.track) &&
+        isShortString(data.albumColor, 12) &&
+        isShortString(data.albumArtUrl, 500) &&
+        isShortString(data.placeName, 80) &&
+        isMusicMapLocation(data.location) &&
+        data.routePoints is list &&
+        data.routePoints.size() <= 160 &&
+        isNumber(data.playedDurationMs) &&
+        data.playedDurationMs >= 0 &&
+        isShortString(data.startedAt, 64) &&
+        isShortString(data.recordedAt, 64);
+    }
+
+    function isMusicMapPublicRecord(data) {
+      return data.keys().hasAll([
+        'schemaVersion',
+        'recordType',
+        'source',
+        'track',
+        'albumColor',
+        'albumArtUrl',
+        'placeName',
+        'location',
+        'routePoints',
+        'playedDurationMs',
+        'startedAt',
+        'recordedAt',
+        'createdAt'
+      ]) &&
+        data.keys().hasOnly([
+        'schemaVersion',
+        'recordType',
+        'source',
+        'track',
+        'albumColor',
+        'albumArtUrl',
+        'placeName',
+        'location',
+        'routePoints',
+        'playedDurationMs',
+        'startedAt',
+        'recordedAt',
+        'createdAt'
+      ]) &&
+        data.schemaVersion is int &&
+        (data.recordType == 'pin' || data.recordType == 'track') &&
+        isShortString(data.source, 40) &&
+        isPlayTargetMap(data.track) &&
+        isShortString(data.albumColor, 12) &&
+        isShortString(data.albumArtUrl, 500) &&
+        isShortString(data.placeName, 80) &&
+        isMusicMapLocation(data.location) &&
+        data.routePoints is list &&
+        data.routePoints.size() <= 160 &&
+        isNumber(data.playedDurationMs) &&
+        data.playedDurationMs >= 0 &&
+        isShortString(data.startedAt, 64) &&
+        isShortString(data.recordedAt, 64);
+    }
+
     function isConsent(data, userId, consentId) {
       return data.keys().hasAll([
         'userId',
@@ -308,10 +417,22 @@ service cloud.firestore {
         allow delete: if isOwner(userId);
       }
 
+      match /musicMapRecords/{recordId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isMusicMapRecord(request.resource.data, userId);
+        allow delete: if isOwner(userId);
+      }
+
       match /consents/{consentId} {
         allow read: if isOwner(userId);
         allow create, update: if isOwner(userId) && isConsent(request.resource.data, userId, consentId);
       }
+    }
+
+    match /musicMapPublicRecords/{recordId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && isMusicMapPublicRecord(request.resource.data);
+      allow update, delete: if false;
     }
   }
 }

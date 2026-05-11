@@ -157,6 +157,8 @@ function serializeRecords(records = []) {
       startAlbumColor: record.startAlbumColor,
       endAlbumColor: record.endAlbumColor,
       albumArtUrl: record.albumArtUrl,
+      startAlbumArtUrl: record.startAlbumArtUrl,
+      endAlbumArtUrl: record.endAlbumArtUrl,
       placeName: record.placeName,
       location,
       currentLocation: normalizePoint(record.currentLocation),
@@ -197,7 +199,10 @@ function getRecordsSignature(records = [], mode, selectedRecordId, shouldFit) {
       const routePoints = Array.isArray(record.routePoints) ? record.routePoints : [];
       const lastPoint = routePoints[routePoints.length - 1] || record.currentLocation || record.location;
       const routeSegmentSignature = Array.isArray(record.routeSegments)
-        ? record.routeSegments.map((segment) => `${segment?.id || ''}:${segment?.albumColor || ''}:${segment?.endIndex ?? ''}`).join('|')
+        ? record.routeSegments.map((segment) => `${segment?.id || ''}:${segment?.albumColor || ''}:${segment?.albumArtUrl || ''}:${segment?.endIndex ?? ''}`).join('|')
+        : '';
+      const markerSignature = Array.isArray(record.trackChangeMarkers)
+        ? record.trackChangeMarkers.map((marker) => `${marker?.id || ''}:${marker?.albumColor || ''}:${marker?.albumArtUrl || ''}`).join('|')
         : '';
       return {
         id: record.id,
@@ -207,10 +212,14 @@ function getRecordsSignature(records = [], mode, selectedRecordId, shouldFit) {
         color: record.albumColor,
         startColor: record.startAlbumColor,
         endColor: record.endAlbumColor,
+        albumArtUrl: record.albumArtUrl,
+        startAlbumArtUrl: record.startAlbumArtUrl,
+        endAlbumArtUrl: record.endAlbumArtUrl,
         routeCount: routePoints.length,
         segmentCount: Array.isArray(record.routeSegments) ? record.routeSegments.length : 0,
         routeSegmentSignature,
         markerCount: Array.isArray(record.trackChangeMarkers) ? record.trackChangeMarkers.length : 0,
+        markerSignature,
         lastPoint: getPointSignature(lastPoint),
         currentLocation: getPointSignature(record.currentLocation),
         startLocation: getPointSignature(record.startLocation),

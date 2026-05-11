@@ -271,6 +271,16 @@ function getRouteSegmentColor(segments = [], position = 'last') {
     : validSegments[validSegments.length - 1].albumColor;
 }
 
+function getRouteSegmentAlbumArtUrl(segments = [], position = 'last') {
+  const validSegments = Array.isArray(segments)
+    ? segments.filter((segment) => segment?.albumArtUrl)
+    : [];
+  if (validSegments.length === 0) return '';
+  return position === 'first'
+    ? validSegments[0].albumArtUrl
+    : validSegments[validSegments.length - 1].albumArtUrl;
+}
+
 function buildRouteSegmentsFromRecords(sortedRecords = []) {
   const routePoints = [];
   const routeSegments = [];
@@ -431,6 +441,8 @@ function buildSessionDisplayRecord(sessionRecords = [], fallbackIndex = 0) {
   const tracks = dedupeDisplayTracks(sorted);
   const startAlbumColor = getRouteSegmentColor(routeSegments, 'first') || first.albumColor || UI.peach;
   const endAlbumColor = getRouteSegmentColor(routeSegments, 'last') || last.albumColor || first.albumColor || UI.peach;
+  const startAlbumArtUrl = getRouteSegmentAlbumArtUrl(routeSegments, 'first') || first.track?.artworkUrl || first.albumArtUrl || '';
+  const endAlbumArtUrl = getRouteSegmentAlbumArtUrl(routeSegments, 'last') || last.track?.artworkUrl || last.albumArtUrl || startAlbumArtUrl;
 
   return {
     id: `session:${sessionId}`,
@@ -439,7 +451,9 @@ function buildSessionDisplayRecord(sessionRecords = [], fallbackIndex = 0) {
     albumColor: isTrack ? startAlbumColor : endAlbumColor,
     startAlbumColor,
     endAlbumColor,
-    albumArtUrl: first.track?.artworkUrl || first.albumArtUrl || '',
+    startAlbumArtUrl,
+    endAlbumArtUrl,
+    albumArtUrl: isTrack ? startAlbumArtUrl : endAlbumArtUrl,
     placeName: first.placeName || last.placeName || '내 음악 위치',
     location: pinLocation,
     routePoints: isTrack ? routePoints : [],
@@ -523,6 +537,8 @@ function buildLiveMusicMapRecord({ session = {}, location, currentTrack }) {
   const startLocation = routePoints[0] || displayLocation;
   const startAlbumColor = getRouteSegmentColor(routeSegments, 'first') || currentSegment.albumColor || track.color || UI.green;
   const endAlbumColor = getRouteSegmentColor(routeSegments, 'last') || currentSegment.albumColor || track.color || UI.green;
+  const startAlbumArtUrl = getRouteSegmentAlbumArtUrl(routeSegments, 'first') || currentSegment.albumArtUrl || track.artworkUrl || '';
+  const endAlbumArtUrl = getRouteSegmentAlbumArtUrl(routeSegments, 'last') || track.artworkUrl || currentSegment.albumArtUrl || startAlbumArtUrl;
 
   return {
     id: 'live:music-map-recording',
@@ -532,7 +548,9 @@ function buildLiveMusicMapRecord({ session = {}, location, currentTrack }) {
     albumColor: endAlbumColor,
     startAlbumColor,
     endAlbumColor,
-    albumArtUrl: track.artworkUrl || currentSegment.albumArtUrl || '',
+    startAlbumArtUrl,
+    endAlbumArtUrl,
+    albumArtUrl: endAlbumArtUrl,
     placeName: currentSegment.placeName || session.placeName || '현재 위치',
     location: startLocation,
     currentLocation: displayLocation,

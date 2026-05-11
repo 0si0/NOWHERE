@@ -1,6 +1,8 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
+  Animated,
+  Easing,
   Image,
   PanResponder,
   StyleSheet,
@@ -153,14 +155,6 @@ function getRecommendationCaption(slotType) {
   }
 }
 
-function fitTitleSize(title, compact) {
-  const length = title.length;
-  if (length > 36) return compact ? 15 : 20;
-  if (length > 28) return compact ? 17 : 23;
-  if (length > 20) return compact ? 20 : 27;
-  return compact ? 24 : 31;
-}
-
 function ContextChip({ icon, label, compact }) {
   return (
     <View style={styles.contextChip}>
@@ -220,14 +214,97 @@ function NowPlayingCard({ currentTrack, playerStatus, compact }) {
         >
           N O W   P L A Y I N G
         </Text>
-        <Text style={[styles.nowPlayingTitle, compact && styles.nowPlayingTitleCompact]} numberOfLines={1}>
+        <MarqueeText
+          style={[styles.nowPlayingTitle, compact && styles.nowPlayingTitleCompact]}
+          containerStyle={styles.nowPlayingTitleClip}
+        >
           {track.title}
-        </Text>
+        </MarqueeText>
         <Text style={styles.nowPlayingSub} numberOfLines={1}>
           {isPlaying ? 'Spotify에서 재생 중' : 'Spotify 재생 대기'}
         </Text>
       </View>
       <Ionicons name="stats-chart-outline" size={24} color={UI.peach} />
+    </View>
+  );
+}
+
+function MarqueeText({ children, style, containerStyle }) {
+  const text = String(children || '');
+  const translateX = useRef(new Animated.Value(0)).current;
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [textWidth, setTextWidth] = useState(0);
+  const overflow = Math.max(0, textWidth - containerWidth);
+  const shouldAnimate = containerWidth > 0 && overflow > 8;
+
+  useEffect(() => {
+    translateX.stopAnimation();
+    translateX.setValue(0);
+
+    if (!shouldAnimate) {
+      return undefined;
+    }
+
+    const distance = overflow + 24;
+    const moveDuration = Math.max(7800, distance * 70);
+    const returnDuration = Math.max(2200, moveDuration * 0.32);
+    const animation = Animated.loop(
+      Animated.sequence([
+        Animated.delay(1000),
+        Animated.timing(translateX, {
+          toValue: -distance,
+          duration: moveDuration,
+          easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.delay(700),
+        Animated.timing(translateX, {
+          toValue: 0,
+          duration: returnDuration,
+          easing: Easing.inOut(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.delay(800),
+      ])
+    );
+
+    animation.start();
+    return () => {
+      animation.stop();
+      translateX.stopAnimation();
+      translateX.setValue(0);
+    };
+  }, [overflow, shouldAnimate, translateX]);
+
+  return (
+    <View
+      style={[styles.marqueeClip, containerStyle]}
+      onLayout={(event) => setContainerWidth(event.nativeEvent.layout.width)}
+    >
+      <Text
+        style={[style, styles.marqueeMeasure]}
+        numberOfLines={1}
+        onTextLayout={(event) => {
+          const width = event.nativeEvent.lines?.[0]?.width || 0;
+          if (width) {
+            setTextWidth(width);
+          }
+        }}
+      >
+        {text}
+      </Text>
+      {shouldAnimate ? (
+        <Animated.Text
+          style={[style, styles.marqueeMoving, { transform: [{ translateX }] }]}
+          numberOfLines={1}
+        >
+          {text}
+        </Animated.Text>
+      ) : (
+        <Text style={[style, styles.marqueeStatic]} numberOfLines={1}>
+          {text}
+        </Text>
+      )}
     </View>
   );
 }
@@ -288,7 +365,7 @@ export default function HomeScreen({ navigation }) {
 
     return () => clearTimeout(timer);
   }, [foregroundPermission, requestPermissions]);
-  const titleFontSize = fitTitleSize(selectedTrack.title, isCompact);
+  const titleFontSize = isCompact ? 24 : 31;
   const isAutoPlayVisibleOn = autoPlayModeEnabled && hasBackgroundPermission;
 
   const recommendationContext = useMemo(() => (
@@ -769,14 +846,12 @@ export default function HomeScreen({ navigation }) {
             <Text style={styles.recommendationLabel} numberOfLines={1}>
               {recommendationLabel}
             </Text>
-            <Text
+            <MarqueeText
               style={[styles.trackTitle, { fontSize: titleFontSize }]}
-              numberOfLines={1}
-              adjustsFontSizeToFit
-              minimumFontScale={0.68}
+              containerStyle={styles.trackTitleClip}
             >
               {selectedTrack.title}
-            </Text>
+            </MarqueeText>
             <Text style={styles.trackArtist} numberOfLines={1}>{selectedTrack.artist}</Text>
             <Text style={styles.tapHint}>
               {selectedTrack.isActionRequired
@@ -1025,6 +1100,29 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     marginBottom: 7,
   },
+  marqueeClip: {
+    overflow: 'hidden',
+  },
+  marqueeMeasure: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    opacity: 0,
+    flexShrink: 0,
+  },
+  marqueeMoving: {
+    alignSelf: 'flex-start',
+    flexShrink: 0,
+    textAlign: 'left',
+  },
+  marqueeStatic: {
+    width: '100%',
+  },
+  trackTitleClip: {
+    width: '100%',
+    height: 39,
+    justifyContent: 'center',
+  },
   trackTitle: {
     maxWidth: '100%',
     color: '#FFFFFF',
@@ -1147,6 +1245,10 @@ const styles = StyleSheet.create({
     color: UI.text,
     fontSize: 14,
     fontWeight: '700',
+  },
+  nowPlayingTitleClip: {
+    width: '100%',
+    height: 20,
     marginTop: 6,
   },
   nowPlayingTitleCompact: {

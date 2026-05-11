@@ -991,7 +991,7 @@ export default function MusicMapScreen({ navigation }) {
             ) : null}
           </View>
 
-          <View style={styles.mapWrap}>
+          <View style={[styles.mapWrap, !effectiveIsRecording && selectedRecord && styles.mapWrapSelected]}>
             <KakaoMusicMap
               apiKey={API_KEYS.KAKAO_MAPS}
               baseUrl={API_KEYS.KAKAO_MAPS_BASE_URL}
@@ -1036,39 +1036,46 @@ export default function MusicMapScreen({ navigation }) {
                     <Ionicons name="close-outline" size={18} color={UI.peach} />
                   </TouchableOpacity>
                 </View>
-
-                <View style={styles.selectedOverlayDivider} />
-                <Text style={styles.selectedOverlayLabel}>이 기록에 포함된 노래</Text>
-                <ScrollView
-                  style={styles.selectedTrackList}
-                  nestedScrollEnabled
-                  showsVerticalScrollIndicator={selectedRecord.tracks.length > 3}
-                >
-                  {selectedRecord.tracks.map((track) => (
-                    <View key={track.key} style={styles.selectedTrackRow}>
-                      <AlbumThumb uri={track.artworkUrl} color={track.albumColor} size={34} />
-                      <View style={styles.recordTextWrap}>
-                        <Text style={styles.recordTitle} numberOfLines={1}>{track.title}</Text>
-                        <Text style={styles.recordMeta} numberOfLines={1}>
-                          {track.artist} · {formatAge(track.recordedAt)}
-                        </Text>
-                      </View>
-                      {track.record?.track ? (
-                        <TouchableOpacity style={styles.selectedPlayButton} onPress={() => handlePlayRecord(track.record)}>
-                          <Ionicons name="play" size={12} color="#211817" />
-                        </TouchableOpacity>
-                      ) : null}
-                    </View>
-                  ))}
-                </ScrollView>
-                {topTracks.length > 0 ? (
-                  <Text style={styles.selectedTopText} numberOfLines={1}>
-                    이 위치 TOP 3 · {topTracks.map((track) => track.title).join(' · ')}
-                  </Text>
-                ) : null}
+                <View style={styles.selectedScrollHint}>
+                  <Text style={styles.selectedScrollHintText}>아래로 스크롤해 포함된 노래 보기</Text>
+                  <Ionicons name="chevron-down-outline" size={14} color={UI.peach} />
+                </View>
               </View>
             ) : null}
           </View>
+
+          {!effectiveIsRecording && selectedRecord ? (
+            <View style={styles.selectedDetailsPanel}>
+              <Text style={styles.selectedOverlayLabel}>이 기록에 포함된 노래</Text>
+              <ScrollView
+                style={styles.selectedTrackList}
+                nestedScrollEnabled
+                showsVerticalScrollIndicator={selectedRecord.tracks.length > 3}
+              >
+                {selectedRecord.tracks.map((track) => (
+                  <View key={track.key} style={styles.selectedTrackRow}>
+                    <AlbumThumb uri={track.artworkUrl} color={track.albumColor} size={34} />
+                    <View style={styles.recordTextWrap}>
+                      <Text style={styles.recordTitle} numberOfLines={1}>{track.title}</Text>
+                      <Text style={styles.recordMeta} numberOfLines={1}>
+                        {track.artist} · {formatAge(track.recordedAt)}
+                      </Text>
+                    </View>
+                    {track.record?.track ? (
+                      <TouchableOpacity style={styles.selectedPlayButton} onPress={() => handlePlayRecord(track.record)}>
+                        <Ionicons name="play" size={12} color="#211817" />
+                      </TouchableOpacity>
+                    ) : null}
+                  </View>
+                ))}
+              </ScrollView>
+              {topTracks.length > 0 ? (
+                <Text style={styles.selectedTopText} numberOfLines={1}>
+                  이 위치 TOP 3 · {topTracks.map((track) => track.title).join(' · ')}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
 
           {currentTrack ? (
             <View style={styles.nowPlaying}>
@@ -1267,6 +1274,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderColor: 'rgba(255, 201, 184, 0.12)',
   },
+  mapWrapSelected: {
+    minHeight: 360,
+  },
   mapLoading: {
     position: 'absolute',
     top: 0,
@@ -1310,7 +1320,6 @@ const styles = StyleSheet.create({
     left: 14,
     right: 14,
     bottom: 14,
-    maxHeight: 340,
     borderRadius: 20,
     padding: 12,
     backgroundColor: 'rgba(18, 15, 14, 0.96)',
@@ -1353,6 +1362,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: UI.panelSoft,
+    borderWidth: 1,
+    borderColor: UI.border,
+  },
+  selectedScrollHint: {
+    marginTop: 9,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: 'rgba(255, 201, 184, 0.12)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  selectedScrollHintText: {
+    color: UI.textMuted,
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  selectedDetailsPanel: {
+    marginHorizontal: 18,
+    marginTop: 8,
+    borderRadius: 18,
+    padding: 12,
+    backgroundColor: UI.panel,
     borderWidth: 1,
     borderColor: UI.border,
   },

@@ -1021,25 +1021,28 @@ export default function MusicMapScreen({ navigation }) {
 
                 <View style={styles.selectedOverlayDivider} />
                 <Text style={styles.selectedOverlayLabel}>이 기록에 포함된 노래</Text>
-                {selectedRecord.tracks.slice(0, 3).map((track) => (
-                  <View key={track.key} style={styles.selectedTrackRow}>
-                    <AlbumThumb uri={track.artworkUrl} color={track.albumColor} size={34} />
-                    <View style={styles.recordTextWrap}>
-                      <Text style={styles.recordTitle} numberOfLines={1}>{track.title}</Text>
-                      <Text style={styles.recordMeta} numberOfLines={1}>
-                        {track.artist} · {formatAge(track.recordedAt)}
-                      </Text>
+                <ScrollView
+                  style={styles.selectedTrackList}
+                  nestedScrollEnabled
+                  showsVerticalScrollIndicator={selectedRecord.tracks.length > 3}
+                >
+                  {selectedRecord.tracks.map((track) => (
+                    <View key={track.key} style={styles.selectedTrackRow}>
+                      <AlbumThumb uri={track.artworkUrl} color={track.albumColor} size={34} />
+                      <View style={styles.recordTextWrap}>
+                        <Text style={styles.recordTitle} numberOfLines={1}>{track.title}</Text>
+                        <Text style={styles.recordMeta} numberOfLines={1}>
+                          {track.artist} · {formatAge(track.recordedAt)}
+                        </Text>
+                      </View>
+                      {track.record?.track ? (
+                        <TouchableOpacity style={styles.selectedPlayButton} onPress={() => handlePlayRecord(track.record)}>
+                          <Ionicons name="play" size={12} color="#211817" />
+                        </TouchableOpacity>
+                      ) : null}
                     </View>
-                    {track.record?.track ? (
-                      <TouchableOpacity style={styles.selectedPlayButton} onPress={() => handlePlayRecord(track.record)}>
-                        <Ionicons name="play" size={12} color="#211817" />
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
-                ))}
-                {selectedRecord.tracks.length > 3 ? (
-                  <Text style={styles.selectedMoreText}>외 {selectedRecord.tracks.length - 3}곡 포함</Text>
-                ) : null}
+                  ))}
+                </ScrollView>
                 {topTracks.length > 0 ? (
                   <Text style={styles.selectedTopText} numberOfLines={1}>
                     이 위치 TOP 3 · {topTracks.map((track) => track.title).join(' · ')}
@@ -1289,6 +1292,7 @@ const styles = StyleSheet.create({
     left: 14,
     right: 14,
     bottom: 14,
+    maxHeight: 340,
     borderRadius: 20,
     padding: 12,
     backgroundColor: 'rgba(18, 15, 14, 0.96)',
@@ -1344,6 +1348,9 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '900',
     marginBottom: 8,
+  },
+  selectedTrackList: {
+    maxHeight: 172,
   },
   selectedTrackRow: {
     minHeight: 44,

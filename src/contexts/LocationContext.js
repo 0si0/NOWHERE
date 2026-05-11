@@ -46,6 +46,7 @@ const BACKGROUND_LOCATION_MAX_AGE_MS = 30 * 60 * 1000;
 const AUTOPLAY_PLACE_REFRESH_INTERVAL_MS = 60 * 1000;
 const LOCATION_STATE_MIN_DISTANCE_M = 5;
 const LOCATION_STATE_MIN_INTERVAL_MS = 10000;
+const MUSIC_MAP_STATIONARY_POLL_INTERVAL_MS = 12000;
 
 function serializeError(error) {
   return error?.message || '위치 정보를 가져오는 중 문제가 발생했습니다.';
@@ -381,6 +382,24 @@ export function LocationProvider({ children }) {
     }
     return result;
   }, []);
+
+  useEffect(() => {
+    if (!musicMapRecording.isActive) {
+      return undefined;
+    }
+
+    const intervalId = setInterval(() => {
+      const coords = locationRef.current;
+      if (!coords) {
+        return;
+      }
+      recordMusicMapPlaybackAndSync(coords, placeNameRef.current?.name || '');
+    }, MUSIC_MAP_STATIONARY_POLL_INTERVAL_MS);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [musicMapRecording.isActive, recordMusicMapPlaybackAndSync]);
 
   useEffect(() => {
     playerRef.current = player;

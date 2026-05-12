@@ -7,6 +7,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -21,6 +22,20 @@ import {
   getMusicMapRecords,
   getOrCreateAppUserId,
 } from '../services/firebaseService';
+import {
+  getTrendingMusicMapTracks,
+  hydrateMusicMapTrackColors,
+  loadMusicMapTrackPlaylists,
+  loadSelectedMusicMapTrackPlaylistId,
+  MAX_TRACK_PLAYLIST_ITEMS,
+  saveMusicMapTrackPlaylists,
+  saveSelectedMusicMapTrackPlaylistId,
+  searchMusicMapTracks,
+} from '../services/musicMapPlaylistService';
+import {
+  startMusicMapTrackPlaylistPlayback,
+  stopMusicMapTrackPlaylistPlayback,
+} from '../services/musicMapPlaylistPlaybackService';
 
 const UI = {
   bg: '#05070A',
@@ -35,6 +50,14 @@ const UI = {
   green: '#6EE89A',
 };
 
+function getSpotifyPlaybackMessage(error, fallback = 'Spotify 재생 요청에 실패했습니다.') {
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('forbidden') || message.includes('403')) {
+    return 'Spotify에서 현재 재생 요청을 허용하지 않았습니다. 앱은 계속 사용할 수 있으며 잠시 후 다시 시도해주세요.';
+  }
+  return error?.message || fallback;
+}
+
 const PERIOD_FILTERS = [
   { key: 'today', label: '하루' },
   { key: 'week', label: '일주일' },
@@ -44,14 +67,7 @@ const MEANINGFUL_ROUTE_DISTANCE_M = 5;
 const LIVE_ROUTE_POINT_MIN_DISTANCE_M = 3;
 const START_END_PIN_MIN_DISTANCE_M = 25;
 const MAX_DISPLAY_ROUTE_POINTS = 360;
-
-function hasPlayableTrack(track = {}) {
-  return Boolean(
-    track &&
-    track.type !== 'playlist' &&
-    (track.title || track.id || track.spotifyUri || track.uri)
-  );
-}
+const DEFAULT_PLAYLIST_NAME = '트랙 플레이리스트';
 
 function isFiniteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
@@ -503,7 +519,7 @@ function buildLiveMusicMapRecord({ session = {}, location, currentTrack }) {
 
   const currentSegment = session.currentSegment || {};
   const segmentTrack = currentSegment.track || null;
-  const track = currentTrack || segmentTrack || {
+  const track = segmentTrack || currentTrack || {
     title: '기록 중',
     artist: 'NOWHERE',
   };
@@ -627,6 +643,21 @@ function AlbumThumb({ uri, color, size = 56 }) {
   );
 }
 
+function getPlaylistItemKey(track = {}) {
+  return String(track.spotifyUri || track.id || `${track.title || ''}:${track.artist || ''}`).toLowerCase();
+}
+
+function createEmptyTrackPlaylist(index = 0) {
+  const now = new Date().toISOString();
+  return {
+    id: `music-map-playlist-${Date.now()}-${index}`,
+    name: `${DEFAULT_PLAYLIST_NAME} ${index + 1}`,
+    tracks: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 export default function MusicMapScreen({ navigation }) {
   const player = useContext(PlayerContext);
   const locationContext = useContext(LocationContext);
@@ -641,6 +672,14 @@ export default function MusicMapScreen({ navigation }) {
   const [periodFilter, setPeriodFilter] = useState('today');
   const [selectedDate, setSelectedDate] = useState(startOfDay(new Date()));
   const [recordingUiPhase, setRecordingUiPhase] = useState('idle');
+  const [activeTab, setActiveTab] = useState('map');
+  const [savedPlaylists, setSavedPlaylists] = useState([]);
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState('');
+  const [trackQuery, setTrackQuery] = useState('');
+  const [trackResults, setTrackResults] = useState([]);
+  const [trendingTracks, setTrendingTracks] = useState([]);
+  const [isSearchingTracks, setIsSearchingTracks] = useState(false);
+  const [isLoadingTrendingTracks, setIsLoadingTrendingTracks] = useState(false);
   const loadRecordsInFlightRef = useRef(null);
   const startActionInFlightRef = useRef(false);
   const stopActionInFlightRef = useRef(false);
@@ -659,6 +698,11 @@ export default function MusicMapScreen({ navigation }) {
   const effectiveIsRecording = isRecording || recordingUiPhase === 'starting' || recordingUiPhase === 'recording';
   const recordingRemainingMs = Math.max(0, (musicMapRecording.maxDurationMs || 60 * 60 * 1000) - recordingElapsedMs);
   const showStartSpinner = isRecordingBusy && !effectiveIsRecording;
+  const selectedPlaylist = useMemo(
+    () => savedPlaylists.find((playlist) => playlist.id === selectedPlaylistId) || savedPlaylists[0] || null,
+    [savedPlaylists, selectedPlaylistId]
+  );
+  const trackPlaylist = selectedPlaylist?.tracks || [];
 
   const loadRecords = useCallback(async ({ refreshing = false, force = false } = {}) => {
     if (loadRecordsInFlightRef.current && !force) {
@@ -698,6 +742,49 @@ export default function MusicMapScreen({ navigation }) {
   useEffect(() => {
     loadRecords();
   }, [loadRecords]);
+
+  useEffect(() => {
+    let isMounted = true;
+    Promise.all([
+      loadMusicMapTrackPlaylists(),
+      loadSelectedMusicMapTrackPlaylistId(),
+    ])
+      .then(([playlists, selectedId]) => {
+        if (!isMounted) return;
+        const nextPlaylists = playlists.length ? playlists : [createEmptyTrackPlaylist(0)];
+        setSavedPlaylists(nextPlaylists);
+        const nextSelectedId = nextPlaylists.some((playlist) => playlist.id === selectedId)
+          ? selectedId
+          : nextPlaylists[0]?.id || '';
+        setSelectedPlaylistId(nextSelectedId);
+        if (!playlists.length) {
+          saveMusicMapTrackPlaylists(nextPlaylists).catch(() => null);
+        }
+        if (nextSelectedId) {
+          saveSelectedMusicMapTrackPlaylistId(nextSelectedId).catch(() => null);
+        }
+      })
+      .catch(() => null);
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    setIsLoadingTrendingTracks(true);
+    getTrendingMusicMapTracks(8)
+      .then((tracks) => {
+        if (isMounted) setTrendingTracks(tracks);
+      })
+      .catch(() => null)
+      .finally(() => {
+        if (isMounted) setIsLoadingTrendingTracks(false);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = navigation.addListener?.('focus', () => {
@@ -796,6 +883,121 @@ export default function MusicMapScreen({ navigation }) {
   const topTracks = useMemo(() => buildTopTracks(selectedRecord?.records || []), [selectedRecord]);
   const mapCenter = useMemo(() => getCenterFromRecords(mapRecords, location), [location, mapRecords]);
 
+  const persistPlaylists = useCallback(async (playlists, nextSelectedId = selectedPlaylistId) => {
+    const saved = await saveMusicMapTrackPlaylists(playlists);
+    const resolvedSelectedId = saved.some((playlist) => playlist.id === nextSelectedId)
+      ? nextSelectedId
+      : saved[0]?.id || '';
+    setSavedPlaylists(saved);
+    setSelectedPlaylistId(resolvedSelectedId);
+    await saveSelectedMusicMapTrackPlaylistId(resolvedSelectedId);
+    return saved;
+  }, [selectedPlaylistId]);
+
+  const persistTrackPlaylist = useCallback(async (tracks) => {
+    const targetPlaylist = selectedPlaylist || savedPlaylists[0] || createEmptyTrackPlaylist(0);
+    const hydratedTracks = await hydrateMusicMapTrackColors(tracks);
+    const now = new Date().toISOString();
+    const nextPlaylist = {
+      ...targetPlaylist,
+      tracks: hydratedTracks,
+      updatedAt: now,
+    };
+    const nextPlaylists = savedPlaylists.some((playlist) => playlist.id === targetPlaylist.id)
+      ? savedPlaylists.map((playlist) => (playlist.id === targetPlaylist.id ? nextPlaylist : playlist))
+      : [nextPlaylist, ...savedPlaylists];
+    await persistPlaylists(nextPlaylists, nextPlaylist.id);
+    return hydratedTracks;
+  }, [persistPlaylists, savedPlaylists, selectedPlaylist]);
+
+  const handleSearchTracks = useCallback(async () => {
+    const query = trackQuery.trim();
+    if (query.length < 2) {
+      Alert.alert('검색어 필요', '곡 제목이나 아티스트명을 2글자 이상 입력해주세요.');
+      return;
+    }
+    setIsSearchingTracks(true);
+    try {
+      const results = await searchMusicMapTracks(query, 10);
+      setTrackResults(results);
+      if (!results.length) {
+        Alert.alert('검색 결과 없음', '앨범 이미지가 있는 곡을 찾지 못했습니다.');
+      }
+    } catch (nextError) {
+      setError(nextError.message || '곡 검색에 실패했습니다.');
+    } finally {
+      setIsSearchingTracks(false);
+    }
+  }, [trackQuery]);
+
+  const handleAddPlaylistTrack = useCallback(async (track) => {
+    if (effectiveIsRecording) {
+      Alert.alert('기록 중 수정 불가', '기록 중에는 트랙 플레이리스트를 수정할 수 없습니다.');
+      return;
+    }
+    if (trackPlaylist.length >= MAX_TRACK_PLAYLIST_ITEMS) {
+      Alert.alert('최대 10곡', '뮤직지도 트랙 플레이리스트는 최대 10곡까지 설정할 수 있습니다.');
+      return;
+    }
+    const key = getPlaylistItemKey(track);
+    if (trackPlaylist.some((item) => getPlaylistItemKey(item) === key)) {
+      return;
+    }
+    await persistTrackPlaylist([...trackPlaylist, track]);
+  }, [effectiveIsRecording, persistTrackPlaylist, trackPlaylist]);
+
+  const handleRemovePlaylistTrack = useCallback(async (index) => {
+    if (effectiveIsRecording) return;
+    await persistTrackPlaylist(trackPlaylist.filter((_, itemIndex) => itemIndex !== index));
+  }, [effectiveIsRecording, persistTrackPlaylist, trackPlaylist]);
+
+  const handleMovePlaylistTrack = useCallback(async (index, direction) => {
+    if (effectiveIsRecording) return;
+    const nextIndex = index + direction;
+    if (nextIndex < 0 || nextIndex >= trackPlaylist.length) return;
+    const nextTracks = [...trackPlaylist];
+    const [item] = nextTracks.splice(index, 1);
+    nextTracks.splice(nextIndex, 0, item);
+    await persistTrackPlaylist(nextTracks);
+  }, [effectiveIsRecording, persistTrackPlaylist, trackPlaylist]);
+
+  const handleSelectPlaylist = useCallback(async (playlistId) => {
+    if (effectiveIsRecording) return;
+    setSelectedPlaylistId(playlistId);
+    await saveSelectedMusicMapTrackPlaylistId(playlistId);
+  }, [effectiveIsRecording]);
+
+  const handleCreatePlaylist = useCallback(async () => {
+    if (effectiveIsRecording) {
+      Alert.alert('기록 중 생성 불가', '기록 중에는 트랙 플레이리스트를 새로 만들 수 없습니다.');
+      return;
+    }
+    const nextPlaylist = createEmptyTrackPlaylist(savedPlaylists.length);
+    await persistPlaylists([...savedPlaylists, nextPlaylist], nextPlaylist.id);
+    setTrackResults([]);
+    setTrackQuery('');
+    setActiveTab('playlist');
+  }, [effectiveIsRecording, persistPlaylists, savedPlaylists]);
+
+  const handleDeletePlaylist = useCallback(async (playlistId) => {
+    if (effectiveIsRecording || savedPlaylists.length <= 1) return;
+    const nextPlaylists = savedPlaylists.filter((playlist) => playlist.id !== playlistId);
+    await persistPlaylists(nextPlaylists, nextPlaylists[0]?.id || '');
+  }, [effectiveIsRecording, persistPlaylists, savedPlaylists]);
+
+  const handleRenamePlaylist = useCallback((name) => {
+    if (effectiveIsRecording || !selectedPlaylist?.id) return;
+    const nextName = String(name || '').slice(0, 32);
+    const now = new Date().toISOString();
+    const nextPlaylists = savedPlaylists.map((playlist) => (
+      playlist.id === selectedPlaylist.id
+        ? { ...playlist, name: nextName, updatedAt: now }
+        : playlist
+    ));
+    setSavedPlaylists(nextPlaylists);
+    saveMusicMapTrackPlaylists(nextPlaylists).catch(() => null);
+  }, [effectiveIsRecording, savedPlaylists, selectedPlaylist?.id]);
+
   const handleToggleRecording = useCallback(async () => {
     setError('');
 
@@ -804,6 +1006,7 @@ export default function MusicMapScreen({ navigation }) {
         return;
       }
       stopActionInFlightRef.current = true;
+      stopMusicMapTrackPlaylistPlayback();
       recordingStartedAtRef.current = null;
       setRecordingElapsedMs(0);
       setRecordingUiPhase('idle');
@@ -831,16 +1034,17 @@ export default function MusicMapScreen({ navigation }) {
       return;
     }
 
-    if (!playerState.isPlaying || !hasPlayableTrack(currentTrack || playerState.currentTrack)) {
+    if (trackPlaylist.length === 0) {
       Alert.alert(
-        '음악 재생 필요',
-        '뮤직지도 기록은 현재 음악이 재생 중일 때만 시작할 수 있습니다.'
+        '플레이리스트 설정 필요',
+        '기록 시작 전에 Music Map용 트랙 플레이리스트에 곡을 하나 이상 추가해주세요.'
       );
       return;
     }
 
     startActionInFlightRef.current = true;
     setIsRecordingBusy(true);
+    let didStartRecording = false;
     try {
       const hasLocationPermission = Boolean(locationContext?.hasForegroundPermission && locationContext?.hasBackgroundPermission);
       if (!hasLocationPermission) {
@@ -865,8 +1069,21 @@ export default function MusicMapScreen({ navigation }) {
       recordingStartedAtRef.current = Date.now();
       setRecordingElapsedMs(0);
       setRecordingUiPhase('recording');
-      await startMusicMapRecording?.();
+      await startMusicMapRecording?.({ trackPlaylist });
+      didStartRecording = true;
+      await startMusicMapTrackPlaylistPlayback(
+        trackPlaylist,
+        typeof player?.play === 'function' ? (track, queue) => player.play(track, queue) : null,
+        (nextError) => {
+          const message = getSpotifyPlaybackMessage(nextError, '트랙 플레이리스트 다음 곡 재생에 실패했습니다.');
+          console.warn('[NOWHERE MusicMap] sequential playlist playback failed', message);
+        }
+      );
     } catch (nextError) {
+      stopMusicMapTrackPlaylistPlayback();
+      if (didStartRecording) {
+        await stopMusicMapRecording?.().catch(() => null);
+      }
       if ((nextError.message || '').includes('취소')) {
         return;
       }
@@ -885,19 +1102,18 @@ export default function MusicMapScreen({ navigation }) {
     loadRecords,
     locationContext?.hasBackgroundPermission,
     locationContext?.hasForegroundPermission,
-    currentTrack,
-    playerState.currentTrack,
-    playerState.isPlaying,
+    player,
     requestLocationPermissions,
     refreshLocation,
     startMusicMapRecording,
     stopMusicMapRecording,
+    trackPlaylist,
   ]);
 
   const handlePlayRecord = useCallback(async (record) => {
     if (!record?.track) return;
     await player?.play?.(record.track, [record.track]).catch((nextError) => {
-      setError(nextError.message || 'Spotify 재생 요청에 실패했습니다.');
+      setError(getSpotifyPlaybackMessage(nextError));
     });
   }, [player]);
 
@@ -927,14 +1143,37 @@ export default function MusicMapScreen({ navigation }) {
             </TouchableOpacity>
           </View>
 
+          <View style={styles.tabSwitch}>
+            {[
+              { key: 'map', label: '지도 보기' },
+              { key: 'playlist', label: '플레이리스트' },
+            ].map((tab) => {
+              const isActive = activeTab === tab.key;
+              return (
+                <TouchableOpacity
+                  key={tab.key}
+                  style={[styles.tabButton, isActive && styles.tabButtonActive]}
+                  onPress={() => setActiveTab(tab.key)}
+                  activeOpacity={0.86}
+                >
+                  <Text style={[styles.tabButtonText, isActive && styles.tabButtonTextActive]}>
+                    {tab.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {activeTab === 'map' ? (
+            <>
           <View style={[styles.recordControl, effectiveIsRecording && styles.recordControlActive]}>
             <View style={styles.recordControlText}>
               <Text style={styles.recordControlLabel}>{effectiveIsRecording ? 'RECORDING' : 'MUSIC MAP'}</Text>
-              <Text style={styles.recordControlTitle}>{effectiveIsRecording ? '기록 진행 중' : '지금부터 기록하기'}</Text>
+              <Text style={styles.recordControlTitle}>{effectiveIsRecording ? '기록 진행 중' : '트랙 플레이리스트 실행'}</Text>
               <Text style={styles.recordControlMeta}>
                 {effectiveIsRecording
                   ? `${formatDuration(recordingElapsedMs)} 경과 · ${formatDuration(recordingRemainingMs)} 남음`
-                  : '누른 순간부터 최대 1시간 동안 경로와 음악을 기록합니다.'}
+                  : '첫 곡부터 순서대로 실행하며 최대 1시간 동안 경로와 음악을 기록합니다.'}
               </Text>
             </View>
             <TouchableOpacity
@@ -954,6 +1193,56 @@ export default function MusicMapScreen({ navigation }) {
                 </>
               )}
             </TouchableOpacity>
+          </View>
+
+          <View style={styles.playlistSelectPanel}>
+            <View style={styles.playlistSelectHeader}>
+              <View style={styles.playlistSelectTitleWrap}>
+                <Text style={styles.playlistLabel}>TRACK PLAYLIST</Text>
+                <Text style={styles.playlistSelectTitle} numberOfLines={1}>
+                  {selectedPlaylist?.name || '플레이리스트 없음'}
+                </Text>
+                <Text style={styles.playlistSelectMeta}>
+                  {trackPlaylist.length ? `${trackPlaylist.length}곡 선택됨` : '플레이리스트 탭에서 곡을 추가해주세요'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.playlistManageButton}
+                onPress={() => setActiveTab('playlist')}
+                activeOpacity={0.86}
+              >
+                <Ionicons name="list-outline" size={16} color={UI.peach} />
+                <Text style={styles.playlistManageText}>설정</Text>
+              </TouchableOpacity>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.savedPlaylistScroller}>
+              {savedPlaylists.map((playlist) => {
+                const isActive = playlist.id === selectedPlaylist?.id;
+                return (
+                  <TouchableOpacity
+                    key={playlist.id}
+                    style={[styles.savedPlaylistChip, isActive && styles.savedPlaylistChipActive]}
+                    onPress={() => handleSelectPlaylist(playlist.id)}
+                    disabled={effectiveIsRecording}
+                    activeOpacity={0.86}
+                  >
+                    <Text style={[styles.savedPlaylistChipText, isActive && styles.savedPlaylistChipTextActive]} numberOfLines={1}>
+                      {playlist.name}
+                    </Text>
+                    <Text style={styles.savedPlaylistChipMeta}>{playlist.tracks?.length || 0}곡</Text>
+                  </TouchableOpacity>
+                );
+              })}
+              <TouchableOpacity
+                style={styles.savedPlaylistAddChip}
+                onPress={handleCreatePlaylist}
+                disabled={effectiveIsRecording}
+                activeOpacity={0.86}
+              >
+                <Ionicons name="add-outline" size={18} color={UI.peach} />
+                <Text style={styles.savedPlaylistAddText}>새로 만들기</Text>
+              </TouchableOpacity>
+            </ScrollView>
           </View>
 
           <View style={styles.periodPanel}>
@@ -1090,6 +1379,161 @@ export default function MusicMapScreen({ navigation }) {
               <View style={[styles.liveDot, { backgroundColor: playerState.isPlaying ? UI.peach : UI.textMuted }]} />
             </View>
           ) : null}
+            </>
+          ) : (
+            <View style={styles.playlistPanel}>
+              <View style={styles.playlistHeader}>
+                <View>
+                  <Text style={styles.playlistLabel}>TRACK PLAYLIST</Text>
+                  <Text style={styles.playlistTitle}>플레이리스트 설정</Text>
+                </View>
+                <Text style={styles.playlistCount}>{trackPlaylist.length}/{MAX_TRACK_PLAYLIST_ITEMS}</Text>
+              </View>
+              <Text style={styles.playlistHelp}>
+                만든 플레이리스트는 자동 저장됩니다. 지도 보기에서 하나를 선택해 기록에 사용할 수 있습니다.
+              </Text>
+
+              <View style={styles.playlistLibraryHeader}>
+                <Text style={styles.playlistLibraryTitle}>내 플레이리스트</Text>
+                <TouchableOpacity
+                  style={styles.playlistCreateButton}
+                  onPress={handleCreatePlaylist}
+                  disabled={effectiveIsRecording}
+                  activeOpacity={0.86}
+                >
+                  <Ionicons name="add-outline" size={16} color={UI.peach} />
+                  <Text style={styles.playlistCreateText}>새로 만들기</Text>
+                </TouchableOpacity>
+              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.savedPlaylistScroller}>
+                {savedPlaylists.map((playlist) => {
+                  const isActive = playlist.id === selectedPlaylist?.id;
+                  return (
+                    <TouchableOpacity
+                      key={playlist.id}
+                      style={[styles.savedPlaylistChip, isActive && styles.savedPlaylistChipActive]}
+                      onPress={() => handleSelectPlaylist(playlist.id)}
+                      disabled={effectiveIsRecording}
+                      activeOpacity={0.86}
+                    >
+                      <Text style={[styles.savedPlaylistChipText, isActive && styles.savedPlaylistChipTextActive]} numberOfLines={1}>
+                        {playlist.name}
+                      </Text>
+                      <Text style={styles.savedPlaylistChipMeta}>{playlist.tracks?.length || 0}곡</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              <View style={styles.playlistEditingHeader}>
+                <View style={styles.playlistEditingTitleWrap}>
+                  <TextInput
+                    value={selectedPlaylist?.name || ''}
+                    onChangeText={handleRenamePlaylist}
+                    placeholder={`${DEFAULT_PLAYLIST_NAME} 1`}
+                    placeholderTextColor={UI.textMuted}
+                    style={styles.playlistNameInput}
+                    editable={!effectiveIsRecording}
+                    maxLength={32}
+                    returnKeyType="done"
+                  />
+                  <Text style={styles.playlistEditingMeta}>변경사항 자동저장</Text>
+                </View>
+                {savedPlaylists.length > 1 ? (
+                  <TouchableOpacity
+                    style={styles.playlistDeleteButton}
+                    onPress={() => handleDeletePlaylist(selectedPlaylist?.id)}
+                    disabled={effectiveIsRecording || !selectedPlaylist?.id}
+                    activeOpacity={0.86}
+                  >
+                    <Ionicons name="trash-outline" size={15} color={UI.peach} />
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+
+              <View style={styles.searchRow}>
+                <TextInput
+                  value={trackQuery}
+                  onChangeText={setTrackQuery}
+                  placeholder="곡 제목 또는 아티스트 검색"
+                  placeholderTextColor={UI.textMuted}
+                  style={styles.searchInput}
+                  editable={!effectiveIsRecording}
+                  returnKeyType="search"
+                  onSubmitEditing={handleSearchTracks}
+                />
+                <TouchableOpacity
+                  style={[styles.searchButton, (isSearchingTracks || effectiveIsRecording) && styles.searchButtonDisabled]}
+                  onPress={handleSearchTracks}
+                  disabled={isSearchingTracks || effectiveIsRecording}
+                >
+                  <Text style={styles.searchButtonText}>{isSearchingTracks ? '검색중' : '검색'}</Text>
+                </TouchableOpacity>
+              </View>
+
+              {trackPlaylist.length > 0 ? (
+                <View style={styles.playlistQueue}>
+                  {trackPlaylist.map((track, index) => (
+                    <View key={`${getPlaylistItemKey(track)}-${index}`} style={styles.playlistQueueRow}>
+                      <Text style={styles.playlistRank}>{index + 1}</Text>
+                      <AlbumThumb uri={track.albumArtUrl || track.artworkUrl} color={track.albumColor || track.color} size={34} />
+                      <View style={styles.playlistTrackText}>
+                        <Text style={styles.playlistTrackTitle} numberOfLines={1}>{track.title}</Text>
+                        <Text style={styles.playlistTrackMeta} numberOfLines={1}>
+                          {track.artist} · {formatDuration(track.durationMs)}
+                        </Text>
+                      </View>
+                      {!effectiveIsRecording ? (
+                        <View style={styles.playlistActions}>
+                          <TouchableOpacity style={styles.iconMiniButton} onPress={() => handleMovePlaylistTrack(index, -1)}>
+                            <Ionicons name="chevron-up-outline" size={15} color={UI.peach} />
+                          </TouchableOpacity>
+                          <TouchableOpacity style={styles.iconMiniButton} onPress={() => handleMovePlaylistTrack(index, 1)}>
+                            <Ionicons name="chevron-down-outline" size={15} color={UI.peach} />
+                          </TouchableOpacity>
+                          <TouchableOpacity style={styles.iconMiniButton} onPress={() => handleRemovePlaylistTrack(index)}>
+                            <Ionicons name="close-outline" size={15} color={UI.peach} />
+                          </TouchableOpacity>
+                        </View>
+                      ) : null}
+                    </View>
+                  ))}
+                </View>
+              ) : (
+                <Text style={styles.playlistEmptyText}>기록 전 최소 1곡을 추가해주세요.</Text>
+              )}
+
+              <Text style={styles.suggestionTitle}>
+                {trackResults.length > 0 ? '검색 결과' : '대한민국 TOP50 추천'}
+              </Text>
+              {isLoadingTrendingTracks && trackResults.length === 0 ? (
+                <View style={styles.suggestionLoading}>
+                  <ActivityIndicator color={UI.peach} />
+                  <Text style={styles.suggestionLoadingText}>추천곡을 불러오는 중</Text>
+                </View>
+              ) : (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.suggestionScroller}>
+                  {(trackResults.length > 0 ? trackResults : trendingTracks).map((track, index) => {
+                    const added = trackPlaylist.some((item) => getPlaylistItemKey(item) === getPlaylistItemKey(track));
+                    return (
+                      <TouchableOpacity
+                        key={`${getPlaylistItemKey(track)}-${index}`}
+                        style={[styles.suggestionCard, added && styles.suggestionCardAdded]}
+                        onPress={() => handleAddPlaylistTrack(track)}
+                        disabled={added || effectiveIsRecording}
+                        activeOpacity={0.86}
+                      >
+                        <AlbumThumb uri={track.albumArtUrl || track.artworkUrl} color={track.albumColor || track.color} size={44} />
+                        <Text style={styles.suggestionTrackTitle} numberOfLines={1}>{track.title}</Text>
+                        <Text style={styles.suggestionTrackMeta} numberOfLines={1}>{track.artist}</Text>
+                        <Text style={styles.suggestionAddText}>{added ? '추가됨' : '추가'}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              )}
+            </View>
+          )}
         </View>
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
@@ -1147,6 +1591,35 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255, 201, 184, 0.08)',
     borderWidth: 1,
     borderColor: UI.border,
+  },
+  tabSwitch: {
+    marginHorizontal: 18,
+    marginTop: 4,
+    marginBottom: 10,
+    height: 46,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: UI.borderStrong,
+    backgroundColor: 'rgba(7, 8, 10, 0.78)',
+    flexDirection: 'row',
+    padding: 4,
+  },
+  tabButton: {
+    flex: 1,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabButtonActive: {
+    backgroundColor: UI.peach,
+  },
+  tabButtonText: {
+    color: UI.textMuted,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  tabButtonTextActive: {
+    color: '#211817',
   },
   modeSwitch: {
     marginHorizontal: 24,
@@ -1239,6 +1712,103 @@ const styles = StyleSheet.create({
   },
   recordToggleTextActive: {
     color: UI.peach,
+  },
+  playlistSelectPanel: {
+    marginHorizontal: 18,
+    marginTop: 10,
+    borderRadius: 18,
+    padding: 12,
+    backgroundColor: 'rgba(255, 241, 236, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.14)',
+  },
+  playlistSelectHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  playlistSelectTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  playlistSelectTitle: {
+    color: UI.text,
+    fontSize: 15,
+    fontWeight: '900',
+    marginTop: 4,
+  },
+  playlistSelectMeta: {
+    color: UI.textMuted,
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 4,
+  },
+  playlistManageButton: {
+    minHeight: 34,
+    borderRadius: 17,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255, 201, 184, 0.08)',
+    borderWidth: 1,
+    borderColor: UI.border,
+  },
+  playlistManageText: {
+    color: UI.peach,
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  savedPlaylistScroller: {
+    gap: 8,
+    paddingTop: 10,
+    paddingRight: 4,
+  },
+  savedPlaylistChip: {
+    minWidth: 108,
+    maxWidth: 156,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    backgroundColor: 'rgba(5, 7, 10, 0.42)',
+    borderWidth: 1,
+    borderColor: UI.border,
+  },
+  savedPlaylistChipActive: {
+    backgroundColor: 'rgba(255, 201, 184, 0.16)',
+    borderColor: UI.borderStrong,
+  },
+  savedPlaylistChipText: {
+    color: UI.textSoft,
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  savedPlaylistChipTextActive: {
+    color: UI.peach,
+  },
+  savedPlaylistChipMeta: {
+    color: UI.textMuted,
+    fontSize: 10,
+    fontWeight: '700',
+    marginTop: 4,
+  },
+  savedPlaylistAddChip: {
+    minHeight: 50,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255, 201, 184, 0.06)',
+    borderWidth: 1,
+    borderColor: UI.border,
+  },
+  savedPlaylistAddText: {
+    color: UI.peach,
+    fontSize: 11,
+    fontWeight: '900',
   },
   filterSwitch: {
     marginHorizontal: 24,
@@ -1566,6 +2136,259 @@ const styles = StyleSheet.create({
     color: UI.textSoft,
     fontSize: 13,
     fontWeight: '800',
+  },
+  playlistPanel: {
+    marginHorizontal: 18,
+    marginTop: 10,
+    borderRadius: 18,
+    padding: 12,
+    backgroundColor: 'rgba(255, 241, 236, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.14)',
+  },
+  playlistHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  playlistLabel: {
+    color: UI.peach,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 2,
+  },
+  playlistTitle: {
+    color: UI.text,
+    fontSize: 16,
+    fontWeight: '900',
+    marginTop: 4,
+  },
+  playlistCount: {
+    color: UI.peach,
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  playlistHelp: {
+    color: UI.textSoft,
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: 8,
+  },
+  playlistLibraryHeader: {
+    marginTop: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  playlistLibraryTitle: {
+    color: UI.text,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  playlistCreateButton: {
+    minHeight: 30,
+    borderRadius: 15,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(255, 201, 184, 0.08)',
+    borderWidth: 1,
+    borderColor: UI.border,
+  },
+  playlistCreateText: {
+    color: UI.peach,
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  playlistEditingHeader: {
+    marginTop: 12,
+    minHeight: 42,
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: 'rgba(5, 7, 10, 0.36)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.12)',
+  },
+  playlistEditingTitleWrap: {
+    flex: 1,
+    minWidth: 0,
+  },
+  playlistEditingTitle: {
+    color: UI.text,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  playlistNameInput: {
+    minHeight: 24,
+    padding: 0,
+    color: UI.text,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  playlistEditingMeta: {
+    color: UI.textMuted,
+    fontSize: 10,
+    fontWeight: '700',
+    marginTop: 3,
+  },
+  playlistDeleteButton: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 201, 184, 0.08)',
+    borderWidth: 1,
+    borderColor: UI.border,
+  },
+  searchRow: {
+    marginTop: 12,
+    flexDirection: 'row',
+    gap: 8,
+  },
+  searchInput: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    color: UI.text,
+    backgroundColor: 'rgba(5, 7, 10, 0.42)',
+    borderWidth: 1,
+    borderColor: UI.border,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  searchButton: {
+    minWidth: 58,
+    minHeight: 40,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: UI.peach,
+  },
+  searchButtonDisabled: {
+    opacity: 0.55,
+  },
+  searchButtonText: {
+    color: '#211817',
+    fontSize: 12,
+    fontWeight: '900',
+  },
+  playlistQueue: {
+    marginTop: 10,
+    gap: 7,
+  },
+  playlistQueueRow: {
+    minHeight: 48,
+    borderRadius: 14,
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 9,
+    backgroundColor: 'rgba(255, 241, 236, 0.04)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.10)',
+  },
+  playlistRank: {
+    width: 18,
+    color: UI.peach,
+    fontSize: 13,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  playlistTrackText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  playlistTrackTitle: {
+    color: UI.text,
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  playlistTrackMeta: {
+    color: UI.textMuted,
+    fontSize: 11,
+    marginTop: 3,
+  },
+  playlistActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  iconMiniButton: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 201, 184, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.14)',
+  },
+  playlistEmptyText: {
+    color: UI.textMuted,
+    fontSize: 12,
+    fontWeight: '700',
+    marginTop: 10,
+  },
+  suggestionTitle: {
+    color: UI.text,
+    fontSize: 12,
+    fontWeight: '900',
+    marginTop: 13,
+    marginBottom: 8,
+  },
+  suggestionLoading: {
+    minHeight: 72,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  suggestionLoadingText: {
+    color: UI.textSoft,
+    fontSize: 12,
+  },
+  suggestionScroller: {
+    gap: 8,
+    paddingRight: 4,
+  },
+  suggestionCard: {
+    width: 112,
+    minHeight: 128,
+    borderRadius: 16,
+    padding: 9,
+    backgroundColor: 'rgba(5, 7, 10, 0.42)',
+    borderWidth: 1,
+    borderColor: UI.border,
+  },
+  suggestionCardAdded: {
+    opacity: 0.58,
+    borderColor: UI.borderStrong,
+  },
+  suggestionTrackTitle: {
+    color: UI.text,
+    fontSize: 12,
+    fontWeight: '900',
+    marginTop: 8,
+  },
+  suggestionTrackMeta: {
+    color: UI.textMuted,
+    fontSize: 10,
+    marginTop: 3,
+  },
+  suggestionAddText: {
+    color: UI.peach,
+    fontSize: 11,
+    fontWeight: '900',
+    marginTop: 8,
   },
   sheetHeader: {
     flexDirection: 'row',

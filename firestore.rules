@@ -79,6 +79,31 @@ service cloud.firestore {
       );
     }
 
+    function isFavoriteArtistMap(data) {
+      return data.keys().hasAll(['id', 'spotifyId', 'name', 'spotifyUri', 'uri', 'artworkUrl', 'imageUrl', 'popularity', 'genres']) &&
+        data.keys().hasOnly(['id', 'spotifyId', 'name', 'spotifyUri', 'uri', 'artworkUrl', 'imageUrl', 'popularity', 'genres']) &&
+        isShortString(data.id, 120) &&
+        isShortString(data.spotifyId, 120) &&
+        isShortString(data.name, 160) &&
+        isShortString(data.spotifyUri, 240) &&
+        isShortString(data.uri, 240) &&
+        isShortString(data.artworkUrl, 500) &&
+        isShortString(data.imageUrl, 500) &&
+        isNumber(data.popularity) &&
+        data.popularity >= 0 &&
+        data.popularity <= 100 &&
+        data.genres is list &&
+        data.genres.size() <= 6;
+    }
+
+    function isFavoriteArtistsList(artists) {
+      return artists is list &&
+        artists.size() <= 3 &&
+        (artists.size() < 1 || isFavoriteArtistMap(artists[0])) &&
+        (artists.size() < 2 || isFavoriteArtistMap(artists[1])) &&
+        (artists.size() < 3 || isFavoriteArtistMap(artists[2]));
+    }
+
     function isSavedPlace(data, userId) {
       return data.keys().hasAll([
         'userId',
@@ -386,6 +411,7 @@ service cloud.firestore {
       allow read: if isOwner(userId);
       allow create, update: if isOwner(userId) &&
         request.resource.data.keys().hasAll([
+          'userId',
           'uid',
           'isAnonymous',
           'lastLoginAt',
@@ -394,17 +420,35 @@ service cloud.firestore {
           'updatedAt'
         ]) &&
         request.resource.data.keys().hasOnly([
+          'userId',
           'uid',
           'isAnonymous',
+          'email',
+          'emailVerified',
+          'displayName',
+          'nickname',
+          'photoURL',
+          'authProvider',
+          'favoriteArtists',
+          'favoriteArtistsUpdatedAt',
           'lastLoginAt',
           'profileVersion',
           'createdAt',
           'updatedAt'
         ]) &&
+        request.resource.data.userId == userId &&
         request.resource.data.uid == userId &&
         request.resource.data.isAnonymous is bool &&
         request.resource.data.profileVersion is int &&
-        isShortString(request.resource.data.lastLoginAt, 64);
+        isShortString(request.resource.data.lastLoginAt, 64) &&
+        (!request.resource.data.keys().hasAny(['email']) || isShortString(request.resource.data.email, 254)) &&
+        (!request.resource.data.keys().hasAny(['emailVerified']) || request.resource.data.emailVerified is bool) &&
+        (!request.resource.data.keys().hasAny(['displayName']) || isShortString(request.resource.data.displayName, 80)) &&
+        (!request.resource.data.keys().hasAny(['nickname']) || isShortString(request.resource.data.nickname, 80)) &&
+        (!request.resource.data.keys().hasAny(['photoURL']) || isShortString(request.resource.data.photoURL, 500)) &&
+        (!request.resource.data.keys().hasAny(['authProvider']) || isShortString(request.resource.data.authProvider, 40)) &&
+        (!request.resource.data.keys().hasAny(['favoriteArtists']) || isFavoriteArtistsList(request.resource.data.favoriteArtists)) &&
+        (!request.resource.data.keys().hasAny(['favoriteArtistsUpdatedAt']) || request.resource.data.favoriteArtistsUpdatedAt is timestamp);
 
       match /savedPlaces/{placeId} {
         allow read: if isOwner(userId);

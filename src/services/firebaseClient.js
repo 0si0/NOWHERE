@@ -22,10 +22,15 @@ const REQUIRED_FIREBASE_KEYS = [
 ];
 
 const PLACEHOLDER_PREFIXES = ['YOUR_', 'http://YOUR_', 'https://YOUR_'];
+const AUTH_LOG_PREFIX = '[NOWHERE Firebase Auth]';
 
 let cachedServices = null;
 let emulatorsConnected = false;
 let authInstance = null;
+
+function logAuthClient(message, details = {}) {
+  console.info(AUTH_LOG_PREFIX, message, details);
+}
 
 function isConfiguredValue(value) {
   if (!value) return false;
@@ -71,12 +76,17 @@ function getFirebaseAuth(app) {
   }
 
   try {
-    // React Native needs AsyncStorage-backed persistence for stable guest sessions.
-    const { getReactNativePersistence } = require('firebase/auth/react-native');
+    // React Native needs AsyncStorage-backed persistence for stable email sessions.
+    const { getReactNativePersistence } = require('@firebase/auth');
     authInstance = initializeAuth(app, {
       persistence: getReactNativePersistence(AsyncStorage),
     });
+    logAuthClient('initialized with AsyncStorage persistence', { platform: Platform.OS });
   } catch (error) {
+    logAuthClient('AsyncStorage persistence init failed; falling back to getAuth', {
+      platform: Platform.OS,
+      message: error?.message || String(error),
+    });
     authInstance = getAuth(app);
   }
 

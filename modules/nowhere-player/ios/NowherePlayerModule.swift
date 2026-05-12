@@ -20,6 +20,7 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
   private var positionMs = 0
   private var playbackStatus = "idle"
   private var lastError: String?
+  private var requestedScopes = ["user-read-currently-playing"]
   private var authSession: ASWebAuthenticationSession?
   private let authPresentationContextProvider = AuthPresentationContextProvider()
   private let appRemoteCoordinator = SpotifyAppRemoteCoordinator.shared
@@ -91,10 +92,15 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
 
     AsyncFunction("prepareAutoPlayAsync") { (options: [String: Any]) async throws -> [String: Any?] in
       self.applyOptions(options)
-      try await self.ensureAuthorized()
       let primerTrack = options["autoPlayPrimer"] as? [String: Any]
       let primerUri = primerTrack.flatMap { self.spotifyUri(from: $0) }
-      try await self.startSpotifyPlaybackWithAppRemote(uri: primerUri ?? "")
+      self.openSpotify(uri: primerUri ?? "spotify:")
+      if let primerTrack {
+        self.currentTrack = primerTrack.mapValues { Optional($0) }
+        self.playbackQueue = [self.currentTrack].compactMap { $0 }
+        self.currentQueueIndex = 0
+      }
+      self.isPlaying = primerUri != nil
       self.playbackStatus = "preparingAutoPlay"
       self.lastError = nil
       self.emitState()
@@ -102,10 +108,13 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     }
 
     AsyncFunction("playInBackgroundAsync") { (track: [String: Any], queue: [[String: Any]]) async throws -> [String: Any?] in
-      try await self.ensureAuthorized()
-
       let requestedTracks = queue.isEmpty ? [track] : queue
-      let resolvedTracks = try await self.resolvePlayableTracks(requestedTracks)
+      let resolvedTracks = requestedTracks.compactMap { requestedTrack -> [String: Any?]? in
+        guard self.spotifyUri(from: requestedTrack) != nil else {
+          return nil
+        }
+        return requestedTrack.mapValues { Optional($0) }
+      }
       guard let firstTrack = resolvedTracks.first, let uri = self.spotifyUri(from: firstTrack) else {
         throw NowherePlayerException("A Spotify URI is required before background playback can start.")
       }
@@ -117,40 +126,22 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       self.lastError = nil
       self.emitState()
 
-      do {
-        try await self.startSpotifyPlayback(uri: uri, queue: resolvedTracks)
-        self.isPlaying = true
-        self.playbackStatus = "playing"
-        self.lastError = nil
-        await self.refreshPlayerState()
-        self.emitState()
-        return self.currentState()
-      } catch let error as SpotifyAPIError {
-        if self.isNoActiveDeviceError(error) {
-          do {
-            try await self.startSpotifyPlaybackWithAppRemote(uri: uri)
-            self.isPlaying = true
-            self.playbackStatus = "openedSpotify"
-            self.lastError = nil
-            self.emitState()
-            return self.currentState()
-          } catch {
-            return self.playbackErrorState(SpotifyAPIError(
-              statusCode: 404,
-              message: error.localizedDescription,
-              reason: "APP_REMOTE_PLAYBACK_FAILED"
-            ))
-          }
-        }
-        return self.playbackErrorState(error)
-      }
+      self.openSpotify(uri: uri)
+      self.isPlaying = true
+      self.playbackStatus = "openedSpotify"
+      self.lastError = nil
+      self.emitState()
+      return self.currentState()
     }
 
     AsyncFunction("playAsync") { (track: [String: Any], queue: [[String: Any]]) async throws -> [String: Any?] in
-      try await self.ensureAuthorized()
-
       let requestedTracks = queue.isEmpty ? [track] : queue
-      let resolvedTracks = try await self.resolvePlayableTracks(requestedTracks)
+      let resolvedTracks = requestedTracks.compactMap { requestedTrack -> [String: Any?]? in
+        guard self.spotifyUri(from: requestedTrack) != nil else {
+          return nil
+        }
+        return requestedTrack.mapValues { Optional($0) }
+      }
       guard let firstTrack = resolvedTracks.first, let uri = self.spotifyUri(from: firstTrack) else {
         throw NowherePlayerException("A Spotify URI is required before playback can start.")
       }
@@ -249,6 +240,22 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     if let nextRedirectUri = firstString(options, keys: ["spotifyRedirectUri", "redirectUri"]) {
       redirectUri = nextRedirectUri
     }
+    if let scopes = options["scopes"] as? [String] {
+      let normalizedScopes = scopes
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+      if !normalizedScopes.isEmpty {
+        requestedScopes = normalizedScopes
+      }
+    } else if let scope = firstString(options, keys: ["scope"]) {
+      let normalizedScopes = scope
+        .split(separator: " ")
+        .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+      if !normalizedScopes.isEmpty {
+        requestedScopes = normalizedScopes
+      }
+    }
     configureAppRemote()
   }
 
@@ -301,16 +308,9 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     let verifier = randomString(length: 64)
     let challenge = codeChallenge(for: verifier)
     let state = randomString(length: 24)
-    let scopes = [
-      "app-remote-control",
-      "streaming",
-      "user-read-playback-state",
-      "user-modify-playback-state",
-      "user-top-read",
-      "user-read-recently-played",
-      "playlist-read-private",
-      "playlist-read-collaborative"
-    ].joined(separator: " ")
+    let scopes = requestedScopes.isEmpty
+      ? "user-read-currently-playing"
+      : requestedScopes.joined(separator: " ")
 
     var components = URLComponents(string: "https://accounts.spotify.com/authorize")
     var queryItems = [
@@ -618,7 +618,7 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     }
 
     do {
-      guard let json = try await spotifyJSONRequest(path: "/v1/me/player", method: "GET") else {
+      guard let json = try await spotifyJSONRequest(path: "/v1/me/player/currently-playing", method: "GET") else {
         return
       }
 
@@ -839,7 +839,7 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     }
 
     if error.statusCode == 403 {
-      return "Spotify 재생 권한이 부족해요. Spotify Premium 계정과 재생 권한을 확인해주세요."
+      return "Spotify에서 현재 재생 요청을 허용하지 않았습니다. 앱은 계속 사용할 수 있으며 잠시 후 다시 시도해주세요."
     }
 
     return "Spotify 재생 요청이 실패했어요. \(error.message)"
@@ -908,6 +908,10 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       } else {
         message = firstString(json, keys: ["error_description", "message", "error"]) ?? message
       }
+    }
+
+    if nextStatusCode == 403 {
+      message = "Spotify에서 현재 요청을 허용하지 않았습니다. 앱은 계속 사용할 수 있으며 잠시 후 다시 시도해주세요."
     }
 
     return SpotifyAPIError(statusCode: nextStatusCode, message: message, reason: reason)

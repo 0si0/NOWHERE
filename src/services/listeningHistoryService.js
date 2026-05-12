@@ -70,6 +70,18 @@ export async function recordListeningEvent({
 } = {}) {
   const ownerId = userId || await getOrCreateAppUserId();
   const normalizedTrack = normalizeTrack(track);
+  console.info('[NOWHERE ListeningEvent] save', {
+    userId: ownerId,
+    eventType,
+    source,
+    title: normalizedTrack.title,
+    artist: normalizedTrack.artist,
+    hasAlbumArt: Boolean(normalizedTrack.artworkUrl),
+    placeName: context.placeName || '',
+    timeBucket: context.timeBucket || '',
+    weatherMood: context.weatherMood || '',
+    hasLocation: typeof context.latitude === 'number' && typeof context.longitude === 'number',
+  });
   return saveListeningEvent({
     userId: ownerId,
     schemaVersion: 2,

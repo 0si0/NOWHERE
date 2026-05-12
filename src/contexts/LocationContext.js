@@ -14,6 +14,7 @@ import {
   markAutoPlayTriggered,
   readAutoPlayModeEnabled,
   readCachedAutoPlayPlaces,
+  resolveAutoPlayPlaybackTarget,
   writePendingAutoPlay,
   writeAutoPlayModeEnabled,
 } from '../services/autoPlayService';
@@ -65,14 +66,6 @@ function normalizeCoords(coords) {
     heading: coords.heading ?? null,
     speed: coords.speed ?? null,
   };
-}
-
-function hasPlayableTrack(track = {}) {
-  return Boolean(
-    track &&
-    track.type !== 'playlist' &&
-    (track.title || track.id || track.spotifyUri || track.uri)
-  );
 }
 
 function getDistanceMeters(a, b) {
@@ -363,10 +356,18 @@ export function LocationProvider({ children }) {
       return { recorded: false, reason: 'inactive' };
     }
 
+    const cachedPlayer = playerRef.current;
     const result = await recordCurrentMusicMapPlayback({
       coords,
       placeName: placeNameValue,
-      allowPlaybackPolling: true,
+      allowPlaybackPolling: false,
+      playbackState: cachedPlayer?.playerState || {
+        currentTrack: cachedPlayer?.currentTrack || null,
+        isPlaying: Boolean(cachedPlayer?.isPlaying),
+        playbackStatus: cachedPlayer?.playerStatus?.playbackStatus || '',
+        authorizationStatus: cachedPlayer?.playerStatus?.authorizationStatus || '',
+        isAuthorized: Boolean(cachedPlayer?.playerStatus?.isAuthorized),
+      },
     }).catch(() => null);
     if (result?.session) {
       const nextSession = {
@@ -528,17 +529,20 @@ export function LocationProvider({ children }) {
     setAutoPlayStatus({ status: 'loading', place, error: null });
 
     try {
+      const playbackTarget = await resolveAutoPlayPlaybackTarget(target);
+      const trackToPlay = playbackTarget?.track || target;
+      const queueToPlay = playbackTarget?.queue?.length ? playbackTarget.queue : [trackToPlay];
       if (playerRef.current?.playInBackground) {
-        await playerRef.current.playInBackground(target, [target]);
+        await playerRef.current.playInBackground(trackToPlay, queueToPlay);
       } else {
-        await musicPlayerService.playInBackground(target, [target]);
+        await musicPlayerService.playInBackground(trackToPlay, queueToPlay);
       }
       await markAutoPlayTriggered(place.id);
       setAutoPlayStatus({ status: 'playing', place, error: null });
 
       recordListeningEvent({
         userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
-        track: target,
+        track: trackToPlay,
         source: 'autoplay',
         recommendationSlot: 'place-autoplay',
         context: buildListeningContext({
@@ -552,11 +556,11 @@ export function LocationProvider({ children }) {
       if (isFirebaseConfigured && authUser?.uid && !authUser.isAnonymous) {
         savePlayRecord({
           userId: authUser.uid,
-          trackId: target.id || target.spotifyUri,
-          title: target.title,
-          artist: target.artist || 'Unknown Artist',
-          albumArtUrl: target.artworkUrl,
-          provider: target.provider || 'spotify',
+          trackId: trackToPlay.id || trackToPlay.spotifyUri,
+          title: trackToPlay.title,
+          artist: trackToPlay.artist || 'Unknown Artist',
+          albumArtUrl: trackToPlay.artworkUrl,
+          provider: trackToPlay.provider || 'spotify',
           placeName: place.name,
           savedPlaceId: place.id,
           latitude: coords?.latitude ?? place.lat ?? place.coordinates?.latitude,
@@ -901,16 +905,14 @@ export function LocationProvider({ children }) {
     return true;
   }, [stopGeofenceRegions]);
 
-  const startMusicMapRecording = useCallback(async () => {
+  const startMusicMapRecording = useCallback(async ({ trackPlaylist = [] } = {}) => {
     const actionToken = musicMapActionTokenRef.current + 1;
     musicMapActionTokenRef.current = actionToken;
     musicMapStopRequestedRef.current = false;
 
-    const cachedPlayerState = playerRef.current?.playerState;
-    const cachedTrack = playerRef.current?.currentTrack || cachedPlayerState?.currentTrack;
-
-    if (!cachedPlayerState?.isPlaying || !hasPlayableTrack(cachedTrack)) {
-      throw new Error('뮤직지도 기록은 현재 음악이 재생 중일 때만 시작할 수 있습니다.');
+    const playlistTracks = Array.isArray(trackPlaylist) ? trackPlaylist.filter(Boolean) : [];
+    if (playlistTracks.length === 0) {
+      throw new Error('뮤직지도 기록을 시작하려면 트랙 플레이리스트를 먼저 설정해주세요.');
     }
 
     if (musicMapStopRequestedRef.current || musicMapActionTokenRef.current !== actionToken) {
@@ -921,8 +923,9 @@ export function LocationProvider({ children }) {
       userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
       coords: locationRef.current,
       placeName: placeNameRef.current?.name || '',
-      initialTrack: cachedTrack || null,
-      initialPlaybackState: cachedPlayerState || null,
+      initialTrack: playlistTracks[0] || null,
+      initialPlaybackState: null,
+      trackPlaylist: playlistTracks,
     });
 
     if (musicMapStopRequestedRef.current || musicMapActionTokenRef.current !== actionToken) {

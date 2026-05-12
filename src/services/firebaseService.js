@@ -1,7 +1,14 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
+  createUserWithEmailAndPassword,
+  EmailAuthProvider,
+  linkWithCredential,
   onAuthStateChanged,
+  reload,
+  sendEmailVerification,
+  signInWithEmailAndPassword,
   signInAnonymously,
+  signOut,
 } from 'firebase/auth';
 import {
   addDoc,
@@ -55,10 +62,33 @@ const LOCAL_SAVED_PLACES_KEY = '@nowhere/local-saved-places';
 const LOCAL_LISTENING_EVENTS_KEY = '@nowhere/local-listening-events';
 const LOCAL_MUSIC_MAP_RECORDS_KEY = '@nowhere/local-music-map-records';
 const LOCAL_MUSIC_MAP_PUBLIC_RECORDS_KEY = '@nowhere/local-music-map-public-records';
+const LOCAL_FAVORITE_ARTISTS_KEY = '@nowhere/favorite-artists-v1';
+const SPOTIFY_ACCESS_REQUEST_ID_KEY = '@nowhere/spotify-access-request-id-v1';
 const LOCAL_USER_PREFIX = 'local-user-';
 const MAX_LOCAL_LISTENING_EVENTS = 500;
 const MAX_LOCAL_MUSIC_MAP_RECORDS = 800;
 const MUSIC_MAP_RECORD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const AUTH_LOG_PREFIX = '[NOWHERE Firebase Auth]';
+
+function getAuthDebugSnapshot(user = null) {
+  const providerIds = Array.isArray(user?.providerData)
+    ? user.providerData.map((provider) => provider?.providerId).filter(Boolean)
+    : [];
+  return {
+    currentUserExists: Boolean(user?.uid),
+    uid: user?.uid || null,
+    isAnonymous: Boolean(user?.isAnonymous),
+    isEmailUser: Boolean(user?.email || providerIds.includes('password')),
+    providerIds,
+  };
+}
+
+function logAuthDebug(message, user = null, details = {}) {
+  console.info(AUTH_LOG_PREFIX, message, {
+    ...getAuthDebugSnapshot(user),
+    ...details,
+  });
+}
 
 function getComparableTimestamp(value) {
   if (!value) return 0;
@@ -131,6 +161,25 @@ async function readLocalListeningEvents() {
 
 async function writeLocalListeningEvents(events) {
   await AsyncStorage.setItem(LOCAL_LISTENING_EVENTS_KEY, JSON.stringify(events.slice(0, MAX_LOCAL_LISTENING_EVENTS)));
+}
+
+async function readLocalFavoriteArtists() {
+  const raw = await AsyncStorage.getItem(LOCAL_FAVORITE_ARTISTS_KEY);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    await AsyncStorage.removeItem(LOCAL_FAVORITE_ARTISTS_KEY);
+    return [];
+  }
+}
+
+async function writeLocalFavoriteArtists(artists) {
+  await AsyncStorage.setItem(LOCAL_FAVORITE_ARTISTS_KEY, JSON.stringify(artists.slice(0, 3)));
 }
 
 async function readLocalMusicMapRecords() {
@@ -315,6 +364,7 @@ async function buildLocalAnonymousProfile(user = null) {
 export async function bootstrapUserProfile(user) {
   const { db } = assertFirebaseConfigured();
   const profileRef = getUserDocumentRef(db, user.uid);
+  logAuthDebug('bootstrap users document', user, { userDocPath: `users/${user.uid}` });
   const existingSnapshot = await getDoc(profileRef);
   const baseProfile = buildUserProfileDocument(user);
 
@@ -337,6 +387,9 @@ export async function bootstrapUserProfile(user) {
 
 export async function ensureAnonymousSession() {
   const { auth } = assertFirebaseConfigured();
+  logAuthDebug('ensureAnonymousSession requested', auth.currentUser, {
+    willCallSignInAnonymously: !auth.currentUser,
+  });
 
   if (auth.currentUser) {
     if (auth.currentUser.isAnonymous) {
@@ -346,8 +399,123 @@ export async function ensureAnonymousSession() {
     return bootstrapUserProfile(auth.currentUser);
   }
 
+  logAuthDebug('signInAnonymously called by explicit guest flow', null, {
+    willCallSignInAnonymously: true,
+  });
   const credential = await signInAnonymously(auth);
   return buildLocalAnonymousProfile(credential.user);
+}
+
+function normalizeEmail(email = '') {
+  return String(email).trim().toLowerCase();
+}
+
+function mapAuthError(error) {
+  const code = error?.code || '';
+  if (code === 'auth/email-already-in-use' || code === 'auth/credential-already-in-use') {
+    return new Error('이미 가입된 이메일입니다. 로그인으로 진행해주세요.');
+  }
+  if (code === 'auth/invalid-email') {
+    return new Error('이메일 주소 형식을 확인해주세요.');
+  }
+  if (code === 'auth/weak-password') {
+    return new Error('비밀번호는 6자 이상으로 입력해주세요.');
+  }
+  if (code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+    return new Error('이메일 또는 비밀번호가 올바르지 않습니다.');
+  }
+  if (code === 'auth/network-request-failed') {
+    return new Error('네트워크 연결을 확인한 뒤 다시 시도해주세요.');
+  }
+  if (code === 'auth/operation-not-allowed') {
+    return new Error('Firebase Console에서 이메일/비밀번호 로그인을 활성화해야 합니다.');
+  }
+  return error instanceof Error ? error : new Error('회원 인증 처리에 실패했습니다.');
+}
+
+export async function createNowhereEmailUser({ email, password }) {
+  const { auth } = assertFirebaseConfigured();
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedPassword = String(password || '');
+
+  if (!normalizedEmail) {
+    throw new Error('이메일 주소를 입력해주세요.');
+  }
+  if (normalizedPassword.length < 6) {
+    throw new Error('비밀번호는 6자 이상으로 입력해주세요.');
+  }
+
+  try {
+    let user = null;
+    if (auth.currentUser?.isAnonymous) {
+      logAuthDebug('link anonymous user to email account', auth.currentUser);
+      const credential = EmailAuthProvider.credential(normalizedEmail, normalizedPassword);
+      const linked = await linkWithCredential(auth.currentUser, credential);
+      user = linked.user;
+    } else {
+      logAuthDebug('create email user', auth.currentUser);
+      const created = await createUserWithEmailAndPassword(auth, normalizedEmail, normalizedPassword);
+      user = created.user;
+    }
+
+    await bootstrapUserProfile(user);
+    if (!user.emailVerified) {
+      await sendEmailVerification(user);
+    }
+    return user;
+  } catch (error) {
+    throw mapAuthError(error);
+  }
+}
+
+export async function signInNowhereWithEmail({ email, password }) {
+  const { auth } = assertFirebaseConfigured();
+  const normalizedEmail = normalizeEmail(email);
+  const normalizedPassword = String(password || '');
+
+  if (!normalizedEmail || !normalizedPassword) {
+    throw new Error('이메일과 비밀번호를 입력해주세요.');
+  }
+
+  try {
+    logAuthDebug('sign in with email requested', auth.currentUser);
+    const credential = await signInWithEmailAndPassword(auth, normalizedEmail, normalizedPassword);
+    await bootstrapUserProfile(credential.user);
+    return credential.user;
+  } catch (error) {
+    throw mapAuthError(error);
+  }
+}
+
+export async function sendNowhereEmailVerification() {
+  const { auth } = assertFirebaseConfigured();
+  const user = auth.currentUser;
+  if (!user || user.isAnonymous) {
+    throw new Error('이메일 인증을 보낼 회원 계정이 없습니다.');
+  }
+  if (user.emailVerified) {
+    return user;
+  }
+  await sendEmailVerification(user);
+  return user;
+}
+
+export async function refreshNowhereEmailVerification() {
+  const { auth } = assertFirebaseConfigured();
+  const user = auth.currentUser;
+  if (!user || user.isAnonymous) {
+    throw new Error('로그인된 회원 계정이 없습니다.');
+  }
+  await reload(user);
+  logAuthDebug('email verification refreshed', auth.currentUser);
+  await bootstrapUserProfile(auth.currentUser);
+  return auth.currentUser;
+}
+
+export async function signOutNowhereAccount() {
+  const { auth } = assertFirebaseConfigured();
+  logAuthDebug('sign out requested', auth.currentUser);
+  await signOut(auth);
 }
 
 export function subscribeToAuthSession(onChange) {
@@ -355,8 +523,11 @@ export function subscribeToAuthSession(onChange) {
 
   return onAuthStateChanged(auth, async (user) => {
     try {
+      logAuthDebug('onAuthStateChanged', user, {
+        willCallSignInAnonymously: false,
+      });
       if (!user) {
-        await signInAnonymously(auth);
+        onChange({ user: null, profile: null, error: null });
         return;
       }
 
@@ -669,12 +840,24 @@ export async function saveListeningEvent(input) {
   }
 
   const userId = assertAuthenticatedUser(auth, sanitized.userId);
-  const docRef = await addDoc(getListeningEventsCollection(db, userId), {
-    ...sanitized,
-    createdAt: serverTimestamp(),
-  });
+  try {
+    const docRef = await addDoc(getListeningEventsCollection(db, userId), {
+      ...sanitized,
+      createdAt: serverTimestamp(),
+    });
 
-  return { id: docRef.id, ...sanitized };
+    return { id: docRef.id, ...sanitized };
+  } catch (error) {
+    console.warn('[NOWHERE ListeningEvent] remote save failed; falling back to local storage', error?.message || error);
+    const fallbackPayload = {
+      ...localPayload,
+      syncStatus: 'localOnly',
+      remoteError: error?.code || error?.message || 'remote-save-failed',
+    };
+    const events = await readLocalListeningEvents();
+    await writeLocalListeningEvents([fallbackPayload, ...events]);
+    return fallbackPayload;
+  }
 }
 
 export async function getListeningEvents(userId, maxRecords = 200) {
@@ -692,17 +875,110 @@ export async function getListeningEvents(userId, maxRecords = 200) {
   }
 
   const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
-  const eventsQuery = query(
-    getListeningEventsCollection(db, validatedOwnerId),
-    orderBy('occurredAt', 'desc'),
-    limit(maxRecords)
-  );
-  const snapshot = await getDocs(eventsQuery);
+  const localEvents = (await readLocalListeningEvents()).filter((event) => event.userId === validatedOwnerId);
+  try {
+    const eventsQuery = query(
+      getListeningEventsCollection(db, validatedOwnerId),
+      orderBy('occurredAt', 'desc'),
+      limit(maxRecords)
+    );
+    const snapshot = await getDocs(eventsQuery);
+    const remoteEvents = snapshot.docs.map((item) => ({
+      id: item.id,
+      ...item.data(),
+    }));
+    const seen = new Set();
+    return [...remoteEvents, ...localEvents]
+      .filter((event) => {
+        const key = event.id || `${event.eventType}:${event.occurredAt}:${event.track?.id || event.track?.spotifyUri || event.track?.title}`;
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((left, right) => getComparableTimestamp(right.occurredAt || right.createdAt) - getComparableTimestamp(left.occurredAt || left.createdAt))
+      .slice(0, maxRecords);
+  } catch (error) {
+    console.warn('[NOWHERE ListeningEvent] remote read failed; using local events', error?.message || error);
+    return localEvents.slice(0, maxRecords);
+  }
+}
 
-  return snapshot.docs.map((item) => ({
-    id: item.id,
-    ...item.data(),
-  }));
+function normalizeFavoriteArtistInput(artist = {}) {
+  const id = String(artist.id || artist.spotifyId || '').trim();
+  const name = String(artist.name || '').trim();
+  return {
+    id,
+    spotifyId: id,
+    name,
+    spotifyUri: String(artist.spotifyUri || artist.uri || '').trim(),
+    uri: String(artist.spotifyUri || artist.uri || '').trim(),
+    artworkUrl: String(artist.artworkUrl || artist.imageUrl || '').trim(),
+    imageUrl: String(artist.artworkUrl || artist.imageUrl || '').trim(),
+    popularity: Number.isFinite(Number(artist.popularity)) ? Number(artist.popularity) : 0,
+    genres: Array.isArray(artist.genres) ? artist.genres.slice(0, 6).map((item) => String(item || '').trim()).filter(Boolean) : [],
+  };
+}
+
+function normalizeFavoriteArtistsInput(artists = []) {
+  const used = new Set();
+  return (Array.isArray(artists) ? artists : [])
+    .map(normalizeFavoriteArtistInput)
+    .filter((artist) => artist.name && (artist.id || artist.spotifyUri))
+    .filter((artist) => {
+      const key = String(artist.id || artist.spotifyUri || artist.name).toLowerCase();
+      if (!key || used.has(key)) {
+        return false;
+      }
+      used.add(key);
+      return true;
+    })
+    .slice(0, 3);
+}
+
+export async function saveUserFavoriteArtists(userId, artists = []) {
+  const ownerId = userId || await getOrCreateAppUserId();
+  const normalizedArtists = normalizeFavoriteArtistsInput(artists);
+  await writeLocalFavoriteArtists(normalizedArtists);
+
+  if (!isFirebaseConfiguredInClient()) {
+    return normalizedArtists;
+  }
+
+  const { auth, db } = assertFirebaseConfigured();
+  if (shouldUseLocalSavedPlaces(auth, ownerId)) {
+    return normalizedArtists;
+  }
+
+  const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
+  await setDoc(getUserDocumentRef(db, validatedOwnerId), {
+    favoriteArtists: normalizedArtists,
+    favoriteArtistsUpdatedAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  return normalizedArtists;
+}
+
+export async function getUserFavoriteArtists(userId) {
+  const ownerId = userId || await getOrCreateAppUserId();
+
+  if (isFirebaseConfiguredInClient()) {
+    try {
+      const { auth, db } = assertFirebaseConfigured();
+      if (!shouldUseLocalSavedPlaces(auth, ownerId)) {
+        const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
+        const snapshot = await getDoc(getUserDocumentRef(db, validatedOwnerId));
+        const remoteArtists = normalizeFavoriteArtistsInput(snapshot.data()?.favoriteArtists || []);
+        if (remoteArtists.length) {
+          await writeLocalFavoriteArtists(remoteArtists);
+          return remoteArtists;
+        }
+      }
+    } catch (error) {
+      console.warn('[NOWHERE Favorite Artists] remote read failed', error?.message || error);
+    }
+  }
+
+  return normalizeFavoriteArtistsInput(await readLocalFavoriteArtists());
 }
 
 async function publishMusicMapPublicRecord(record) {
@@ -1020,6 +1296,42 @@ export async function callCloudFunction(name, payload) {
   const callable = httpsCallable(functions, name);
   const result = await callable(payload);
   return result.data;
+}
+
+export async function callCloudFunctionOptionalAuth(name, payload) {
+  const { functions } = assertFirebaseConfigured();
+  const callable = httpsCallable(functions, name);
+  const result = await callable(payload);
+  return result.data;
+}
+
+export async function submitSpotifyAccessRequest({ spotifyFullName, spotifyEmail }) {
+  const { auth, functions } = assertFirebaseConfigured();
+  const callable = httpsCallable(functions, 'submitSpotifyAccessRequest');
+  const result = await callable({
+    spotifyFullName,
+    spotifyEmail,
+    nowhereUserId: auth.currentUser?.uid || '',
+    nowhereEmail: auth.currentUser?.email || '',
+  });
+  if (result.data?.requestId) {
+    await AsyncStorage.setItem(SPOTIFY_ACCESS_REQUEST_ID_KEY, result.data.requestId);
+  }
+  return result.data;
+}
+
+export async function getSpotifyAccessRequestStatus() {
+  const { auth, functions } = assertFirebaseConfigured();
+  const requestId = await AsyncStorage.getItem(SPOTIFY_ACCESS_REQUEST_ID_KEY).catch(() => '');
+  const callable = httpsCallable(functions, 'getSpotifyAccessRequestStatus');
+  const result = await callable({
+    requestId: requestId || '',
+    nowhereUserId: auth.currentUser?.uid || '',
+  });
+  if (result.data?.requestId) {
+    await AsyncStorage.setItem(SPOTIFY_ACCESS_REQUEST_ID_KEY, result.data.requestId);
+  }
+  return result.data || { status: 'none' };
 }
 
 export function getFirebaseRuntimeStatus() {

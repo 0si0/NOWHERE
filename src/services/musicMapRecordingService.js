@@ -7,7 +7,6 @@ import {
 } from './albumColorService';
 import { saveMusicMapRecord } from './firebaseService';
 import { getDistanceMeters } from './locationService';
-import { musicPlayerService } from './musicPlayerService';
 
 const MUSIC_MAP_SESSION_KEY = '@nowhere/music-map-recording-session-v2';
 const MUSIC_MAP_STOPPING_KEY = '@nowhere/music-map-recording-stopping-v2';
@@ -22,12 +21,12 @@ const ROUTE_POINT_MAX_COUNT = 720;
 const SAVED_ROUTE_POINT_MAX_COUNT = 160;
 const MAX_RECORDING_DURATION_MS = 60 * 60 * 1000;
 const MIN_SAVED_ROUTE_POINTS = 1;
-const SPOTIFY_STATE_MIN_POLL_INTERVAL_MS = 10000;
 const SPOTIFY_STATE_MAX_CACHE_AGE_MS = 10 * 60 * 1000;
 const SESSION_IDLE_WRITE_INTERVAL_MS = 15000;
-const PLAYER_CONFIGURE_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_TRACK_DURATION_MS = 180000;
+const MIN_TRACK_DURATION_MS = 30000;
+const MAX_TRACK_PLAYLIST_ITEMS = 10;
 let recordInFlight = false;
-let lastPlayerConfiguredAt = 0;
 const sessionListeners = new Set();
 
 function isFiniteCoordinate(value) {
@@ -77,8 +76,72 @@ function hasValidTrack(track = {}) {
     (track.title || track.id || track.spotifyUri || track.uri);
 }
 
+function normalizePlaylistTrack(track = {}) {
+  if (!hasValidTrack(track)) {
+    return null;
+  }
+  const albumArtUrl = getAlbumArtUrl(track);
+  return {
+    type: 'track',
+    provider: track.provider || 'spotify',
+    id: track.id || track.trackId || track.spotifyUri || track.uri || getTrackKey(track),
+    trackId: track.trackId || track.id || track.spotifyUri || track.uri || '',
+    title: track.title || track.trackName || 'Unknown Track',
+    artist: track.artist || track.artistName || '',
+    album: track.album || track.albumName || '',
+    albumArtUrl,
+    artworkUrl: albumArtUrl,
+    albumColor: track.albumColor || track.color || getAlbumColor(track),
+    color: track.albumColor || track.color || getAlbumColor(track),
+    spotifyUri: track.spotifyUri || track.uri || '',
+    uri: track.spotifyUri || track.uri || '',
+    durationMs: Math.max(MIN_TRACK_DURATION_MS, Number(track.durationMs || 0) || DEFAULT_TRACK_DURATION_MS),
+  };
+}
+
+function normalizeTrackPlaylist(tracks = []) {
+  const used = new Set();
+  return (Array.isArray(tracks) ? tracks : [])
+    .map(normalizePlaylistTrack)
+    .filter(Boolean)
+    .filter((track) => {
+      const key = getTrackIdentity(track);
+      if (!key || used.has(key)) return false;
+      used.add(key);
+      return true;
+    })
+    .slice(0, MAX_TRACK_PLAYLIST_ITEMS);
+}
+
+function getPlaylistTrackAtElapsed(session = {}, elapsedMs = getElapsedMs(session)) {
+  const trackPlaylist = normalizeTrackPlaylist(session.trackPlaylist);
+  if (!trackPlaylist.length) return null;
+
+  let cursorMs = 0;
+  for (let index = 0; index < trackPlaylist.length; index += 1) {
+    const track = trackPlaylist[index];
+    const durationMs = Math.max(MIN_TRACK_DURATION_MS, Number(track.durationMs || 0) || DEFAULT_TRACK_DURATION_MS);
+    if (elapsedMs < cursorMs + durationMs || index === trackPlaylist.length - 1) {
+      return {
+        track,
+        index,
+        startedAtMs: cursorMs,
+        endedAtMs: cursorMs + durationMs,
+      };
+    }
+    cursorMs += durationMs;
+  }
+
+  return {
+    track: trackPlaylist[trackPlaylist.length - 1],
+    index: trackPlaylist.length - 1,
+    startedAtMs: cursorMs,
+    endedAtMs: cursorMs + DEFAULT_TRACK_DURATION_MS,
+  };
+}
+
 function getAlbumColor(track = {}) {
-  return getInitialAlbumColor(track);
+  return track.albumColor || track.color || getInitialAlbumColor(track);
 }
 
 function getTrackSummary(track = {}, albumColor = getAlbumColor(track)) {
@@ -282,15 +345,6 @@ function getElapsedMs(session, nowMs = Date.now()) {
   return Number.isFinite(startedAtMs) ? Math.max(0, nowMs - startedAtMs) : 0;
 }
 
-async function getCurrentSpotifyState(nowMs = Date.now()) {
-  if (!lastPlayerConfiguredAt || nowMs - lastPlayerConfiguredAt > PLAYER_CONFIGURE_INTERVAL_MS) {
-    await musicPlayerService.configure().then(() => {
-      lastPlayerConfiguredAt = Date.now();
-    }).catch(() => null);
-  }
-  return musicPlayerService.getState();
-}
-
 function sanitizePlaybackState(state = {}, checkedAtMs = Date.now()) {
   const track = hasValidTrack(state.currentTrack) ? state.currentTrack : null;
   return {
@@ -310,21 +364,6 @@ function getCachedPlaybackState(session = {}, nowMs = Date.now()) {
     return null;
   }
   return cached;
-}
-
-function shouldPollPlaybackState(session = {}, pointCoords, nowMs = Date.now()) {
-  const lastCheckedAt = Number(session.lastPlaybackState?.checkedAtMs || 0);
-  if (!lastCheckedAt || nowMs - lastCheckedAt >= SPOTIFY_STATE_MIN_POLL_INTERVAL_MS) {
-    return true;
-  }
-
-  const routePoints = session.currentSegment?.routePoints || [];
-  const lastPoint = routePoints[routePoints.length - 1];
-  if (!lastPoint || !pointCoords) {
-    return false;
-  }
-
-  return false;
 }
 
 function getSegmentTrack(segment = {}) {
@@ -550,13 +589,16 @@ export async function startMusicMapRecordingSession({
   placeName = '',
   initialTrack = null,
   initialPlaybackState = null,
+  trackPlaylist = [],
 } = {}) {
   await AsyncStorage.removeItem(MUSIC_MAP_STOPPING_KEY);
   await clearSegmentSaveLocks();
   const ownerId = userId || '';
   const now = new Date().toISOString();
   const point = normalizeCoords(coords);
-  const track = hasValidTrack(initialTrack) ? initialTrack : null;
+  const normalizedPlaylist = normalizeTrackPlaylist(trackPlaylist);
+  const firstPlaylistTrack = normalizedPlaylist[0] || null;
+  const track = firstPlaylistTrack || (hasValidTrack(initialTrack) ? initialTrack : null);
   const initialRoutePoint = point ? buildRoutePoint(point, 0) : null;
   const currentSegment = track && initialRoutePoint ? buildSegment(track, initialRoutePoint, now, placeName, 0) : null;
   const session = {
@@ -566,6 +608,8 @@ export async function startMusicMapRecordingSession({
     placeName,
     startedAt: now,
     lastUpdatedAt: now,
+    trackPlaylist: normalizedPlaylist,
+    playlistMode: normalizedPlaylist.length > 0 ? 'internal-track-playlist' : '',
     currentSegment,
     lastPlaybackState: initialPlaybackState || (track ? sanitizePlaybackState({
       isPlaying: true,
@@ -616,7 +660,8 @@ export async function stopMusicMapRecordingSession() {
 export async function recordCurrentMusicMapPlayback({
   coords,
   placeName = '',
-  allowPlaybackPolling = true,
+  allowPlaybackPolling = false,
+  playbackState = null,
 } = {}) {
   if (recordInFlight) {
     return { recorded: false, reason: 'busy' };
@@ -644,19 +689,27 @@ export async function recordCurrentMusicMapPlayback({
     }
 
     const nowMs = Date.now();
-    let playbackState = getCachedPlaybackState(session, nowMs);
-    if (allowPlaybackPolling && (shouldPollPlaybackState(session, pointCoords, nowMs) || !playbackState)) {
-      const state = await getCurrentSpotifyState(nowMs).catch(() => null);
-      if (!state && !playbackState && !getSegmentTrack(session.currentSegment)) {
-        return { recorded: false, reason: 'playback-unavailable' };
-      }
-      if (state) {
-        playbackState = sanitizePlaybackState(state, nowMs);
-        session.lastPlaybackState = playbackState;
-      }
+    const playlistSnapshot = getPlaylistTrackAtElapsed(session, getElapsedMs(session, nowMs));
+    let effectivePlaybackState = playlistSnapshot?.track
+      ? sanitizePlaybackState({
+        isPlaying: true,
+        currentTrack: playlistSnapshot.track,
+        playbackStatus: 'playlist-timeline',
+        isAuthorized: true,
+        authorizationStatus: 'internal-playlist',
+      }, nowMs)
+      : getCachedPlaybackState(session, nowMs);
+    const externalPlaybackState = playbackState ? sanitizePlaybackState(playbackState, nowMs) : null;
+    if (!playlistSnapshot?.track && externalPlaybackState?.track) {
+      effectivePlaybackState = externalPlaybackState;
+      session.lastPlaybackState = effectivePlaybackState;
     }
 
-    const track = playbackState?.track || getSegmentTrack(session.currentSegment);
+    if (!playlistSnapshot?.track && allowPlaybackPolling && !effectivePlaybackState && !getSegmentTrack(session.currentSegment)) {
+      return { recorded: false, reason: 'playback-unavailable' };
+    }
+
+    const track = effectivePlaybackState?.track || getSegmentTrack(session.currentSegment);
     if (!hasValidTrack(track)) {
       session.lastUpdatedAt = new Date().toISOString();
       if (await isStopRequested()) {
@@ -666,7 +719,7 @@ export async function recordCurrentMusicMapPlayback({
       return { recorded: false, reason: 'missing-track' };
     }
 
-    const trackKey = playbackState?.trackKey || getTrackKey(track);
+    const trackKey = effectivePlaybackState?.trackKey || getTrackKey(track);
     if (!trackKey) {
       return { recorded: false, reason: 'missing-track-key' };
     }

@@ -1,12 +1,20 @@
-import { Platform } from 'react-native';
+import { Linking, Platform } from 'react-native';
 import NativeNowherePlayer, {
   addPlaybackStateListener,
   isNativeNowherePlayerAvailable,
 } from 'nowhere-player';
 import { API_KEYS } from '../constants';
+import { callCloudFunctionOptionalAuth } from './firebaseService';
 
 const DEFAULT_COLOR = '#7CFFB2';
 const STOPPED_STATUS = 'stopped';
+const EXTERNAL_PLAYBACK_MAX_AGE_MS = 3 * 60 * 60 * 1000;
+const USER_SPOTIFY_READ_SCOPES = [
+  'user-read-currently-playing',
+  'playlist-read-private',
+  'playlist-read-collaborative',
+];
+let externalPlaybackSnapshot = null;
 
 function getProvider() {
   if (Platform.OS === 'ios' || Platform.OS === 'android') {
@@ -20,6 +28,7 @@ function getNativeOptions(extraOptions = {}) {
     provider: getProvider(),
     spotifyClientId: API_KEYS.SPOTIFY.clientId,
     spotifyRedirectUri: API_KEYS.SPOTIFY.redirectUri,
+    scopes: USER_SPOTIFY_READ_SCOPES,
     ...extraOptions,
   };
 }
@@ -83,8 +92,127 @@ function isAuthorizedState(state = {}) {
   return state?.authorizationStatus === 'authorized' || state?.isAuthorized === true;
 }
 
+function hasTrackIdentity(track = {}) {
+  return Boolean(track?.spotifyUri || track?.uri || track?.id || track?.title);
+}
+
+function isExternalPlaybackFresh(nowMs = Date.now()) {
+  return Boolean(
+    externalPlaybackSnapshot?.track &&
+    externalPlaybackSnapshot?.openedAtMs &&
+    nowMs - externalPlaybackSnapshot.openedAtMs < EXTERNAL_PLAYBACK_MAX_AGE_MS
+  );
+}
+
+function setExternalPlaybackSnapshot(track, queue = [], playbackStatus = 'playing') {
+  const normalizedTrack = normalizeTrack(track);
+  if (!hasTrackIdentity(normalizedTrack)) {
+    return null;
+  }
+  externalPlaybackSnapshot = {
+    openedAtMs: Date.now(),
+    track: normalizedTrack,
+    queue: normalizeQueue(queue.length ? queue : [track]),
+    playbackStatus,
+  };
+  return externalPlaybackSnapshot;
+}
+
+function clearExternalPlaybackSnapshot() {
+  externalPlaybackSnapshot = null;
+}
+
+function getExternalPlaybackState(baseState = {}) {
+  if (!isExternalPlaybackFresh()) {
+    return null;
+  }
+  return mergeNativeState({
+    ...baseState,
+    provider: 'spotify',
+    available: true,
+    isConnected: Boolean(baseState.isConnected),
+    isAuthorized: Boolean(baseState.isAuthorized),
+    authorizationStatus: baseState.authorizationStatus || 'ownerApiProxy',
+    isPlaying: true,
+    playbackStatus: externalPlaybackSnapshot.playbackStatus || 'playing',
+    currentTrack: externalPlaybackSnapshot.track,
+    queue: externalPlaybackSnapshot.queue,
+  });
+}
+
 function buildReconnectionRequiredError() {
-  return new Error('Spotify 재연결이 필요합니다. 설정 또는 로그인 화면에서 Spotify를 다시 연결해주세요.');
+  return new Error('이 곡의 Spotify 링크가 아직 준비되지 않았습니다. 추천을 다시 불러온 뒤 시도해주세요.');
+}
+
+function getSpotifyOpenUri(track = {}) {
+  const uri = String(track.spotifyUri || track.uri || '').trim();
+  return uri.startsWith('spotify:') ? uri : '';
+}
+
+function getSpotifyWebUrlFromUri(uri = '') {
+  const parts = String(uri || '').split(':');
+  if (parts.length < 3 || parts[0] !== 'spotify') {
+    return '';
+  }
+  const [, type, id] = parts;
+  if (!type || !id) {
+    return '';
+  }
+  return `https://open.spotify.com/${encodeURIComponent(type)}/${encodeURIComponent(id)}`;
+}
+
+function isSpotifyControlBlockedError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('403') ||
+    message.includes('forbidden') ||
+    message.includes('허용하지 않았') ||
+    message.includes('premium') ||
+    message.includes('재연결이 필요');
+}
+
+async function openSpotifyUriFallback(track, queue = []) {
+  const uri = getSpotifyOpenUri(track);
+  if (!uri) {
+    throw buildReconnectionRequiredError();
+  }
+
+  try {
+    await Linking.openURL(uri);
+  } catch (error) {
+    const webUrl = getSpotifyWebUrlFromUri(uri);
+    if (!webUrl) {
+      throw error;
+    }
+    await Linking.openURL(webUrl);
+  }
+  const snapshot = setExternalPlaybackSnapshot(track, queue, 'playing');
+  return mergeNativeState({
+    provider: 'spotify',
+    available: true,
+    isConnected: false,
+    isPlaying: true,
+    playbackStatus: 'playing',
+    currentTrack: snapshot?.track || normalizeTrack(track),
+    queue: snapshot?.queue || normalizeQueue(queue.length ? queue : [track]),
+  });
+}
+
+async function searchTracksWithOwnerApi(query, limit = 5) {
+  const searchText = String(query || '').trim();
+  if (searchText.length < 2) {
+    return [];
+  }
+
+  try {
+    const response = await callCloudFunctionOptionalAuth('searchSpotifyTracks', {
+      query: searchText,
+      limit: Math.max(1, Math.min(Number(limit) || 5, 20)),
+    });
+    return (Array.isArray(response?.tracks) ? response.tracks : []).map(normalizeTrack);
+  } catch (error) {
+    console.warn('[NOWHERE Spotify Owner API] track search failed', error?.message || error);
+    return [];
+  }
 }
 
 async function maybeResolvePlayableTrack(track) {
@@ -117,6 +245,7 @@ async function maybeResolvePlayableTrack(track) {
 export const musicPlayerService = {
   provider: getProvider(),
   isNativeAvailable: isNativeNowherePlayerAvailable,
+  userReadScopes: USER_SPOTIFY_READ_SCOPES,
 
   normalizeTrack,
   normalizeQueue,
@@ -158,27 +287,42 @@ export const musicPlayerService = {
   },
 
   async prepareAutoPlay(primerTrack = null) {
+    const normalizedPrimer = primerTrack ? normalizeTrack(primerTrack) : null;
     if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.prepareAutoPlayAsync) {
-      return mergeNativeState({ provider: 'mock', available: false, playbackStatus: 'preparingAutoPlay' });
+      if (normalizedPrimer && getSpotifyOpenUri(normalizedPrimer)) {
+        return openSpotifyUriFallback(normalizedPrimer, [normalizedPrimer]);
+      }
+      return mergeNativeState({ provider: 'mock', available: false, playbackStatus: 'readyToOpenSpotify' });
     }
 
-    if ((Platform.OS === 'ios' || Platform.OS === 'android') && !API_KEYS.SPOTIFY.clientId) {
-      return { provider: 'spotify', authorized: false, status: 'missingClientId' };
+    try {
+      const state = await NativeNowherePlayer.prepareAutoPlayAsync(getNativeOptions({
+        autoPlayPrimer: normalizedPrimer,
+        skipAuthorization: true,
+      }));
+      if (normalizedPrimer) {
+        setExternalPlaybackSnapshot(normalizedPrimer, [normalizedPrimer], state?.playbackStatus || 'openedSpotify');
+      }
+      return mergeNativeState(state);
+    } catch (error) {
+      if (normalizedPrimer && getSpotifyOpenUri(normalizedPrimer)) {
+        return openSpotifyUriFallback(normalizedPrimer, [normalizedPrimer]);
+      }
+      return mergeNativeState({
+        provider: 'spotify',
+        available: true,
+        isConnected: false,
+        playbackStatus: 'readyToOpenSpotify',
+      });
     }
-
-    const currentState = await this.getState().catch(() => null);
-    if (!isAuthorizedState(currentState)) {
-      throw buildReconnectionRequiredError();
-    }
-
-    const playablePrimerTrack = primerTrack ? await maybeResolvePlayableTrack(primerTrack) : null;
-    const state = await NativeNowherePlayer.prepareAutoPlayAsync(getNativeOptions({
-      autoPlayPrimer: playablePrimerTrack,
-    }));
-    return mergeNativeState(state);
   },
 
   async search(query, limit = 5) {
+    const ownerResults = await searchTracksWithOwnerApi(query, limit);
+    if (ownerResults.length) {
+      return ownerResults;
+    }
+
     if (!isNativeNowherePlayerAvailable || !query) {
       return [];
     }
@@ -246,6 +390,9 @@ export const musicPlayerService = {
     const requestedQueue = normalizeQueue(queue.length ? queue : [track]);
 
     if (!isNativeNowherePlayerAvailable) {
+      if (getSpotifyOpenUri(track)) {
+        return openSpotifyUriFallback(track, requestedQueue);
+      }
       return mergeNativeState({
         provider: 'mock',
         available: false,
@@ -256,23 +403,33 @@ export const musicPlayerService = {
       });
     }
 
-    const currentState = await this.getState().catch(() => null);
-    if (!isAuthorizedState(currentState)) {
-      throw buildReconnectionRequiredError();
+    try {
+      const playableTrack = await maybeResolvePlayableTrack(track);
+      const playableQueue = await Promise.all(
+        requestedQueue.map((queuedTrack) => maybeResolvePlayableTrack(queuedTrack))
+      );
+      const state = await NativeNowherePlayer.playAsync(playableTrack, playableQueue);
+      return mergeNativeState(state);
+    } catch (error) {
+      if (isSpotifyControlBlockedError(error)) {
+        return openSpotifyUriFallback(track, requestedQueue);
+      }
+      throw error;
     }
+  },
 
-    const playableTrack = await maybeResolvePlayableTrack(track);
-    const playableQueue = await Promise.all(
-      requestedQueue.map((queuedTrack) => maybeResolvePlayableTrack(queuedTrack))
-    );
-    const state = await NativeNowherePlayer.playAsync(playableTrack, playableQueue);
-    return mergeNativeState(state);
+  async openInSpotify(track, queue = []) {
+    const requestedQueue = normalizeQueue(queue.length ? queue : [track]);
+    return openSpotifyUriFallback(track, requestedQueue);
   },
 
   async playInBackground(track, queue = []) {
     const requestedQueue = normalizeQueue(queue.length ? queue : [track]);
 
     if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.playInBackgroundAsync) {
+      if (getSpotifyOpenUri(track)) {
+        return openSpotifyUriFallback(track, requestedQueue);
+      }
       return mergeNativeState({
         provider: 'mock',
         available: false,
@@ -283,25 +440,28 @@ export const musicPlayerService = {
       });
     }
 
-    const currentState = await this.getState().catch(() => null);
-    if (!isAuthorizedState(currentState)) {
-      throw buildReconnectionRequiredError();
+    try {
+      const playableTrack = await maybeResolvePlayableTrack(track);
+      const playableQueue = await Promise.all(
+        requestedQueue.map((queuedTrack) => maybeResolvePlayableTrack(queuedTrack))
+      );
+      const state = await NativeNowherePlayer.playInBackgroundAsync(playableTrack, playableQueue);
+      const mergedState = mergeNativeState(state);
+      const failure = buildPlaybackFailure(mergedState);
+      if (failure) {
+        throw failure;
+      }
+      return mergedState;
+    } catch (error) {
+      if (isSpotifyControlBlockedError(error)) {
+        return openSpotifyUriFallback(track, requestedQueue);
+      }
+      throw error;
     }
-
-    const playableTrack = await maybeResolvePlayableTrack(track);
-    const playableQueue = await Promise.all(
-      requestedQueue.map((queuedTrack) => maybeResolvePlayableTrack(queuedTrack))
-    );
-    const state = await NativeNowherePlayer.playInBackgroundAsync(playableTrack, playableQueue);
-    const mergedState = mergeNativeState(state);
-    const failure = buildPlaybackFailure(mergedState);
-    if (failure) {
-      throw failure;
-    }
-    return mergedState;
   },
 
   async pause() {
+    clearExternalPlaybackSnapshot();
     if (!isNativeNowherePlayerAvailable) return mergeNativeState({ provider: 'mock', available: false, isPlaying: false, playbackStatus: 'paused' });
     return mergeNativeState(await NativeNowherePlayer.pauseAsync());
   },
@@ -312,6 +472,7 @@ export const musicPlayerService = {
   },
 
   async stop() {
+    clearExternalPlaybackSnapshot();
     if (!isNativeNowherePlayerAvailable) return mergeNativeState({ provider: 'mock', available: false, isPlaying: false, playbackStatus: STOPPED_STATUS, currentTrack: null, queue: [] });
     return mergeNativeState(await NativeNowherePlayer.stopAsync());
   },
@@ -337,8 +498,18 @@ export const musicPlayerService = {
 
   async getState() {
     if (!isNativeNowherePlayerAvailable) {
-      return mergeNativeState({ provider: 'mock', available: false });
+      return getExternalPlaybackState({ provider: 'mock', available: false }) ||
+        mergeNativeState({ provider: 'mock', available: false });
     }
-    return mergeNativeState(await NativeNowherePlayer.getStateAsync());
+    const nativeState = mergeNativeState(await NativeNowherePlayer.getStateAsync());
+    const nativeHasLiveTrack = hasTrackIdentity(nativeState.currentTrack);
+    if (nativeState.isPlaying && nativeHasLiveTrack) {
+      clearExternalPlaybackSnapshot();
+      return nativeState;
+    }
+    if (!isAuthorizedState(nativeState) || !nativeHasLiveTrack || ['idle', 'unknown', 'notDetermined'].includes(nativeState.playbackStatus)) {
+      return getExternalPlaybackState(nativeState) || nativeState;
+    }
+    return nativeState;
   },
 };

@@ -24,6 +24,7 @@ import {
   saveSavedPlace,
   updateSavedPlace,
 } from '../services/firebaseService';
+import { loadMusicMapTrackPlaylists } from '../services/musicMapPlaylistService';
 import { musicPlayerService } from '../services/musicPlayerService';
 
 const EMPTY_ARTWORK = require('../../assets/EmptyMark.png');
@@ -47,6 +48,24 @@ const UI = {
   amber: '#F7A94D',
 };
 
+function getSpotifyDataMessage(error, fallback = 'Spotify 요청에 실패했습니다.') {
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('forbidden') || message.includes('403')) {
+    return 'Spotify에서 현재 데이터를 허용하지 않았습니다. 앱은 계속 사용할 수 있으며 잠시 후 다시 시도해주세요.';
+  }
+  return error?.message || fallback;
+}
+
+function shouldRetryWithSpotifyPermission(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('authorization') ||
+    message.includes('scope') ||
+    message.includes('forbidden') ||
+    message.includes('403') ||
+    message.includes('401') ||
+    message.includes('spotify 권한');
+}
+
 function formatTimestamp(value) {
   if (!value) {
     return '방금 전';
@@ -66,6 +85,7 @@ function formatTimestamp(value) {
 function normalizePlayTargetForForm(track = {}) {
   const title = track.title || track.name || track.playlist?.title || '';
   const type = track.type === 'playlist' ? 'playlist' : 'track';
+  const tracks = Array.isArray(track.tracks) ? track.tracks : [];
   const artist = track.artist || track.artistName || track.ownerName || '';
   const spotifyUri = track.spotifyUri || track.uri || track.playlist?.playlistId || '';
 
@@ -75,7 +95,7 @@ function normalizePlayTargetForForm(track = {}) {
 
   return {
     type,
-    provider: 'spotify',
+    provider: track.provider || (tracks.length ? 'nowhere' : 'spotify'),
     id: track.id || spotifyUri || `${title}-${artist}`,
     spotifyUri,
     title: title || (type === 'playlist' ? '선택한 플레이리스트' : '선택한 곡'),
@@ -83,9 +103,25 @@ function normalizePlayTargetForForm(track = {}) {
     album: track.album || '',
     artworkUrl: track.artworkUrl || track.albumArtUrl || track.playlist?.artworkUrl || '',
     durationMs: track.durationMs || 0,
-    trackCount: track.trackCount || 0,
-    ownerName: track.ownerName || '',
+    trackCount: track.trackCount || tracks.length || 0,
+    ownerName: track.ownerName || (tracks.length ? 'NOWHERE' : ''),
+    tracks,
   };
+}
+
+function normalizeInternalPlaylistForForm(playlist = {}) {
+  const tracks = Array.isArray(playlist.tracks) ? playlist.tracks.filter(Boolean) : [];
+  const firstTrack = tracks[0] || {};
+  return normalizePlayTargetForForm({
+    type: 'playlist',
+    provider: 'nowhere',
+    id: playlist.id,
+    title: playlist.name || '뮤직지도 플레이리스트',
+    ownerName: 'NOWHERE',
+    artworkUrl: firstTrack.artworkUrl || firstTrack.albumArtUrl || '',
+    trackCount: tracks.length,
+    tracks,
+  });
 }
 
 function TrackArtwork({ track, size = 48 }) {
@@ -250,7 +286,7 @@ export default function PlaceSetupScreen({ navigation }) {
         Alert.alert('검색 결과 없음', '다른 곡명이나 아티스트명으로 다시 검색해주세요.');
       }
     } catch (error) {
-      Alert.alert('Spotify 검색 실패', error.message || 'Spotify 곡 검색에 실패했습니다.');
+      Alert.alert('Spotify 검색 실패', getSpotifyDataMessage(error, 'Spotify 곡 검색에 실패했습니다.'));
     } finally {
       setIsSearchingTracks(false);
     }
@@ -259,17 +295,20 @@ export default function PlaceSetupScreen({ navigation }) {
   const handleLoadPlaylists = async () => {
     try {
       setIsLoadingPlaylists(true);
-      const playlists = await musicPlayerService.getUserPlaylists(30);
-      const normalizedPlaylists = playlists.map(normalizePlayTargetForForm).filter(Boolean);
+      const playlists = await loadMusicMapTrackPlaylists();
+      const normalizedPlaylists = playlists
+        .filter((playlist) => Array.isArray(playlist.tracks) && playlist.tracks.length > 0)
+        .map(normalizeInternalPlaylistForForm)
+        .filter(Boolean);
       setTargetMode('playlist');
       setTrackResults(normalizedPlaylists);
       if (normalizedPlaylists.length === 0) {
-        Alert.alert('플레이리스트 없음', 'Spotify에서 불러올 플레이리스트가 없습니다.');
+        Alert.alert('플레이리스트 없음', '뮤직지도에서 먼저 트랙 플레이리스트를 만들어주세요.');
       }
     } catch (error) {
       Alert.alert(
         '플레이리스트 가져오기 실패',
-        error.message || 'Spotify 플레이리스트를 불러오지 못했습니다. Spotify 권한을 다시 확인해주세요.'
+        error.message || '뮤직지도 플레이리스트를 불러오지 못했습니다.'
       );
     } finally {
       setIsLoadingPlaylists(false);
@@ -488,7 +527,7 @@ export default function PlaceSetupScreen({ navigation }) {
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>3. Spotify 음악 선택</Text>
+          <Text style={styles.sectionTitle}>3. 자동재생 음악 선택</Text>
           <View style={styles.modeRow}>
             <TouchableOpacity
               style={[styles.modeButton, targetMode === 'track' && styles.modeButtonActive]}
@@ -557,7 +596,7 @@ export default function PlaceSetupScreen({ navigation }) {
               </View>
             </View>
           ) : (
-            <Text style={styles.helperText}>이 장소에 도착했을 때 Spotify 앱으로 열 곡 또는 플레이리스트를 선택하세요.</Text>
+            <Text style={styles.helperText}>이 장소에 도착했을 때 Spotify 앱으로 열 곡 또는 NOWHERE 플레이리스트를 선택하세요.</Text>
           )}
 
           {trackResults.map((track) => (

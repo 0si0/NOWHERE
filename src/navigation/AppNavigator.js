@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -10,12 +10,14 @@ import { SessionProvider } from '../contexts/SessionContext';
 
 import HomeScreen from '../screens/HomeScreen';
 import AuthGateScreen from '../screens/AuthGateScreen';
-import SpotifyPermissionScreen from '../screens/SpotifyPermissionScreen';
 import RecommendScreen from '../screens/RecommendScreen';
 import VibeScreen from '../screens/VibeScreen';
 import PlaceSetupScreen from '../screens/PlaceSetupScreen';
-import { isNowhereOnboardingComplete, isSpotifyOnboardingComplete } from '../services/onboardingService';
-import { musicPlayerService } from '../services/musicPlayerService';
+import {
+  getOnboardingAccountMode,
+  isNowhereOnboardingComplete,
+} from '../services/onboardingService';
+import { ensureOwnerSpotifyReady } from '../services/ownerSpotifyService';
 import { useSession } from '../contexts/SessionContext';
 
 const Stack = createNativeStackNavigator();
@@ -38,35 +40,58 @@ function RootStack() {
 }
 
 function AppEntry() {
+  const [isCheckingOwnerSpotify, setIsCheckingOwnerSpotify] = useState(true);
+  const [ownerSpotifyError, setOwnerSpotifyError] = useState('');
   const [isCheckingOnboarding, setIsCheckingOnboarding] = useState(true);
   const [isAccountReady, setIsAccountReady] = useState(false);
-  const [isSpotifyAuthorized, setIsSpotifyAuthorized] = useState(false);
-  const { isLoading: isSessionLoading } = useSession();
+  const [accountMode, setAccountMode] = useState('member');
+  const { authUser, isLoading: isSessionLoading } = useSession();
+
+  const runOwnerSpotifyPreflight = useCallback(async () => {
+    setIsCheckingOwnerSpotify(true);
+    setOwnerSpotifyError('');
+    const result = await ensureOwnerSpotifyReady();
+    if (!result.ok) {
+      setOwnerSpotifyError(result.message || 'Spotify owner API 준비에 실패했습니다.');
+    }
+    setIsCheckingOwnerSpotify(false);
+  }, []);
 
   useEffect(() => {
+    runOwnerSpotifyPreflight();
+  }, [runOwnerSpotifyPreflight]);
+
+  useEffect(() => {
+    if (isCheckingOwnerSpotify || ownerSpotifyError || isSessionLoading) {
+      return undefined;
+    }
+
     let mounted = true;
     async function checkOnboarding() {
       const accountReady = await isNowhereOnboardingComplete();
       if (!accountReady) {
-        return { accountReady: false, spotifyAuthorized: false };
+        return {
+          accountReady: false,
+          accountMode: 'member',
+        };
       }
 
-      const spotifyOnboardingComplete = await isSpotifyOnboardingComplete();
-      const state = await musicPlayerService.configure().catch(() => null);
-      const authorized = state?.authorizationStatus === 'authorized' || state?.isAuthorized === true;
-      return { accountReady, spotifyAuthorized: spotifyOnboardingComplete || authorized };
+      const nextAccountMode = await getOnboardingAccountMode();
+      return {
+        accountReady,
+        accountMode: nextAccountMode,
+      };
     }
 
     checkOnboarding()
       .then((result) => {
         if (!mounted) return;
         setIsAccountReady(Boolean(result.accountReady));
-        setIsSpotifyAuthorized(Boolean(result.spotifyAuthorized));
+        setAccountMode(result.accountMode || 'member');
       })
       .catch(() => {
         if (!mounted) return;
         setIsAccountReady(false);
-        setIsSpotifyAuthorized(false);
       })
       .finally(() => {
         if (mounted) {
@@ -77,7 +102,29 @@ function AppEntry() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [authUser?.uid, isCheckingOwnerSpotify, isSessionLoading, ownerSpotifyError]);
+
+  if (isCheckingOwnerSpotify) {
+    return (
+      <View style={styles.loadingScreen}>
+        <ActivityIndicator color="#FFC8B8" />
+        <Text style={styles.loadingTitle}>Spotify 추천 준비 중</Text>
+        <Text style={styles.loadingText}>NOWHERE 음악 추천 서버를 먼저 연결하고 있어요.</Text>
+      </View>
+    );
+  }
+
+  if (ownerSpotifyError) {
+    return (
+      <View style={styles.loadingScreen}>
+        <Text style={styles.errorTitle}>Spotify 추천 서버 연결 실패</Text>
+        <Text style={styles.errorText}>{ownerSpotifyError}</Text>
+        <TouchableOpacity style={styles.retryButton} activeOpacity={0.86} onPress={runOwnerSpotifyPreflight}>
+          <Text style={styles.retryButtonText}>다시 시도</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   if (isCheckingOnboarding || isSessionLoading) {
     return (
@@ -88,11 +135,17 @@ function AppEntry() {
   }
 
   if (!isAccountReady) {
-    return <AuthGateScreen onComplete={() => setIsAccountReady(true)} />;
+    return <AuthGateScreen onComplete={(nextMode = 'member') => {
+      setAccountMode(nextMode);
+      setIsAccountReady(true);
+    }} />;
   }
 
-  if (!isSpotifyAuthorized) {
-    return <SpotifyPermissionScreen onComplete={() => setIsSpotifyAuthorized(true)} />;
+  if (accountMode !== 'guest' && (!authUser?.uid || authUser.isAnonymous || !authUser.emailVerified)) {
+    return <AuthGateScreen onComplete={(nextMode = 'member') => {
+      setAccountMode(nextMode);
+      setIsAccountReady(true);
+    }} />;
   }
 
   return <RootStack />;
@@ -120,5 +173,47 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: '#05070A',
+    paddingHorizontal: 28,
+  },
+  loadingTitle: {
+    color: '#FFF1EC',
+    fontSize: 22,
+    fontWeight: '900',
+    marginTop: 18,
+    textAlign: 'center',
+  },
+  loadingText: {
+    color: '#9E908D',
+    fontSize: 15,
+    lineHeight: 22,
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  errorTitle: {
+    color: '#FFF1EC',
+    fontSize: 22,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  errorText: {
+    color: '#D9C6C0',
+    fontSize: 15,
+    lineHeight: 22,
+    marginTop: 12,
+    textAlign: 'center',
+  },
+  retryButton: {
+    minHeight: 52,
+    borderRadius: 999,
+    backgroundColor: '#FFC8B8',
+    paddingHorizontal: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 22,
+  },
+  retryButtonText: {
+    color: '#07100B',
+    fontSize: 16,
+    fontWeight: '900',
   },
 });

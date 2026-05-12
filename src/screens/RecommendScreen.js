@@ -39,6 +39,19 @@ function buildArtworkSource(artworkUrl) {
   return artworkUrl ? { uri: artworkUrl, cache: 'reload' } : EMPTY_ARTWORK;
 }
 
+function getSpotifyPlaybackMessage(error, fallback = 'Spotify로 곡을 열지 못했습니다.') {
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('forbidden') || message.includes('403')) {
+    return 'Spotify에서 현재 재생 요청을 허용하지 않았습니다. 앱은 계속 사용할 수 있으며 잠시 후 다시 시도해주세요.';
+  }
+  return error?.message || fallback;
+}
+
+function canOpenSpotifyTrack(track = {}) {
+  const uri = String(track.spotifyUri || track.uri || '').trim();
+  return uri.startsWith('spotify:track:') || uri.startsWith('spotify:playlist:');
+}
+
 function buildSections(slots) {
   const labels = {
     taste: '요즘 자주 듣는곡',
@@ -117,12 +130,24 @@ export default function RecommendScreen() {
   }, [activeFilter, slots]);
 
   const handlePlay = async (song) => {
-    if (song.isChallenge || song.slotType === 'challenge') {
+    if (song.isChallenge || song.slotType === 'challenge' || song.isActionRequired || song.isPending) {
       Alert.alert('Challenge', '메인 화면의 Challenge 원에서 조합을 선택해 추천받을 수 있습니다.');
       return;
     }
 
-    const queue = slots.filter((slot) => !slot.isChallenge && slot.slotType !== 'challenge');
+    if (!canOpenSpotifyTrack(song)) {
+      Alert.alert('추천 준비 중', '이 곡의 Spotify 링크가 아직 준비되지 않았습니다. 추천을 새로고침한 뒤 다시 시도해주세요.');
+      loadRecommendations({ force: true }).catch(() => {});
+      return;
+    }
+
+    const queue = slots.filter((slot) => (
+      !slot.isChallenge &&
+      !slot.isActionRequired &&
+      !slot.isPending &&
+      slot.slotType !== 'challenge' &&
+      canOpenSpotifyTrack(slot)
+    ));
     const selectedIndex = queue.findIndex((item) => item.id === song.id);
     const orderedQueue = selectedIndex >= 0
       ? queue.slice(selectedIndex).concat(queue.slice(0, selectedIndex))
@@ -139,7 +164,7 @@ export default function RecommendScreen() {
       }).catch(() => {});
       loadRecommendations({ force: true }).catch(() => {});
     } catch (error) {
-      Alert.alert('Spotify 재생 실패', error.message || 'Spotify로 곡을 열지 못했습니다.');
+      Alert.alert('Spotify 재생 실패', getSpotifyPlaybackMessage(error));
     }
   };
 

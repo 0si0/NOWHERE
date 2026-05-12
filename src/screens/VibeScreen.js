@@ -14,6 +14,14 @@ const LISTENERS = [
 
 const TOP_SONG = { title: "Nothing's Gonna Hurt You Baby", artist: 'Cigarettes After Sex', plays: 12, color: COLORS.green };
 
+function getSpotifyPlaybackMessage(error, fallback = 'Spotify 재생을 시작하지 못했습니다.') {
+  const message = String(error?.message || '').toLowerCase();
+  if (message.includes('forbidden') || message.includes('403')) {
+    return 'Spotify에서 현재 재생 요청을 허용하지 않았습니다. 앱은 계속 사용할 수 있으며 잠시 후 다시 시도해주세요.';
+  }
+  return error?.message || fallback;
+}
+
 export default function VibeScreen() {
   const { play, currentTrack } = useContext(PlayerContext);
   const [nearbyCount] = useState(5);
@@ -37,7 +45,7 @@ export default function VibeScreen() {
         LISTENERS.map((l, i) => ({ id: `vibe-${i}`, title: l.song, artist: l.artist, color: l.color }))
       );
     } catch (error) {
-      Alert.alert('Spotify 재생 실패', error.message || 'Spotify 재생을 시작하지 못했습니다.');
+      Alert.alert('Spotify 재생 실패', getSpotifyPlaybackMessage(error));
     }
   };
 

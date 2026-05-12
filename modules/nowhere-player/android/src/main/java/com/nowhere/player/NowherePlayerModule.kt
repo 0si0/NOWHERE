@@ -47,6 +47,7 @@ class NowherePlayerModule : Module() {
   private var authPromise: Promise? = null
   private var shouldOpenSpotifyAfterAuth: Boolean = false
   private var pendingAutoPlayPrimerUri: String? = null
+  private var requestedScopes: Array<String> = arrayOf("user-read-currently-playing")
 
   override fun definition() = ModuleDefinition {
     Name("NowherePlayer")
@@ -134,16 +135,7 @@ class NowherePlayerModule : Module() {
 
       authPromise = promise
       val request = AuthorizationRequest.Builder(clientId, AuthorizationResponse.Type.TOKEN, redirectUri)
-        .setScopes(arrayOf(
-          "app-remote-control",
-          "streaming",
-          "user-read-playback-state",
-          "user-modify-playback-state",
-          "user-top-read",
-          "user-read-recently-played",
-          "playlist-read-private",
-          "playlist-read-collaborative"
-        ))
+        .setScopes(requestedScopes)
         .setShowDialog(forcePrompt)
         .build()
       AuthorizationClient.openLoginActivity(activity, SPOTIFY_AUTH_REQUEST_CODE, request)
@@ -189,36 +181,16 @@ class NowherePlayerModule : Module() {
         return@AsyncFunction
       }
 
-      if (clientId.isBlank()) {
-        promise.reject("ERR_SPOTIFY_CLIENT_ID", "Spotify client id is missing.", null)
-        return@AsyncFunction
+      playbackStatus = "preparingAutoPlay"
+      primerUri?.let { uri ->
+        currentTrack = mergeTrackPayload(options["autoPlayPrimer"] as? Map<String, Any?> ?: emptyMap(), uri)
+        playbackQueue = listOfNotNull(currentTrack)
+        currentQueueIndex = 0
+        isPlaying = true
       }
-
-      if (isAccessTokenValid()) {
-        playbackStatus = "preparingAutoPlay"
-        launchSpotifyUri(primerUri ?: "spotify:")
-        emitState()
-        promise.resolve(currentState())
-        return@AsyncFunction
-      }
-
-      shouldOpenSpotifyAfterAuth = true
-      pendingAutoPlayPrimerUri = primerUri
-      authPromise = promise
-      val request = AuthorizationRequest.Builder(clientId, AuthorizationResponse.Type.TOKEN, redirectUri)
-        .setScopes(arrayOf(
-          "app-remote-control",
-          "streaming",
-          "user-read-playback-state",
-          "user-modify-playback-state",
-          "user-top-read",
-          "user-read-recently-played",
-          "playlist-read-private",
-          "playlist-read-collaborative"
-        ))
-        .setShowDialog(false)
-        .build()
-      AuthorizationClient.openLoginActivity(activity, SPOTIFY_AUTH_REQUEST_CODE, request)
+      launchSpotifyUri(primerUri ?: "spotify:")
+      emitState()
+      promise.resolve(currentState())
     }
 
     AsyncFunction("playInBackgroundAsync") Coroutine { track: Map<String, Any?>, queue: List<Map<String, Any?>> ->
@@ -238,9 +210,9 @@ class NowherePlayerModule : Module() {
       playbackStatus = "loading"
       emitState()
 
-      startSpotifyPlayback(uri, playbackQueue)
+      launchSpotifyUri(uri)
       isPlaying = true
-      playbackStatus = "playing"
+      playbackStatus = "openedSpotify"
       emitState()
       return@Coroutine currentState()
     }
@@ -350,6 +322,13 @@ class NowherePlayerModule : Module() {
     (options["spotifyRedirectUri"] as? String)?.takeIf { it.isNotBlank() }?.let {
       redirectUri = it
     }
+    val scopesOption = options["scopes"]
+    requestedScopes = when (scopesOption) {
+      is List<*> -> scopesOption.mapNotNull { it as? String }.map { it.trim() }.filter { it.isNotBlank() }.toTypedArray()
+      is Array<*> -> scopesOption.mapNotNull { it as? String }.map { it.trim() }.filter { it.isNotBlank() }.toTypedArray()
+      is String -> scopesOption.split(" ").map { it.trim() }.filter { it.isNotBlank() }.toTypedArray()
+      else -> requestedScopes
+    }.ifEmpty { arrayOf("user-read-currently-playing") }
   }
 
   private fun spotifyTokenPrefs() =

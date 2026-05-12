@@ -84,6 +84,33 @@ export function PlayerProvider({ children }) {
     }
   }, [applyState]);
 
+  const openInSpotify = useCallback(async (track, trackQueue = []) => {
+    const normalizedTrack = musicPlayerService.normalizeTrack(track);
+    const normalizedQueue = musicPlayerService.normalizeQueue(trackQueue.length ? trackQueue : [track]);
+    setPlayerState((prev) => ({
+      ...prev,
+      error: null,
+      playbackStatus: 'loading',
+      queue: normalizedQueue,
+      currentTrack: normalizedTrack,
+      isPlaying: true,
+    }));
+
+    try {
+      const state = await musicPlayerService.openInSpotify(normalizedTrack, normalizedQueue);
+      applyState(state);
+      return state;
+    } catch (error) {
+      setPlayerState((prev) => ({
+        ...prev,
+        isPlaying: false,
+        playbackStatus: 'error',
+        error: error.message,
+      }));
+      throw error;
+    }
+  }, [applyState]);
+
   const requestAuthorization = useCallback(async (options = {}) => {
     const result = await musicPlayerService.requestAuthorization(options);
     setPlayerState((prev) => ({
@@ -259,6 +286,7 @@ export function PlayerProvider({ children }) {
     playerStatus: playerState,
     playerState,
     play,
+    openInSpotify,
     playInBackground,
     pause,
     resume,
@@ -275,6 +303,7 @@ export function PlayerProvider({ children }) {
   }), [
     playerState,
     play,
+    openInSpotify,
     playInBackground,
     pause,
     resume,

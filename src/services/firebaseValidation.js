@@ -212,10 +212,17 @@ function cleanTimeRules(timeRules = []) {
 
 export function buildUserProfileDocument(user) {
   return {
+    userId: user.uid,
     uid: user.uid,
     isAnonymous: !!user.isAnonymous,
+    email: user.email || '',
+    emailVerified: !!user.emailVerified,
+    displayName: user.displayName || '',
+    nickname: user.displayName || '',
+    photoURL: user.photoURL || '',
+    authProvider: user.isAnonymous ? 'anonymous' : (user.providerData?.[0]?.providerId || 'password'),
     lastLoginAt: new Date().toISOString(),
-    profileVersion: 1,
+    profileVersion: 2,
   };
 }
 

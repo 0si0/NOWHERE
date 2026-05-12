@@ -5,6 +5,7 @@ const AUTOPLAY_PLACE_CACHE_KEY = '@nowhere/autoplay-place-cache';
 const AUTOPLAY_COOLDOWN_KEY = '@nowhere/autoplay-cooldowns';
 const PENDING_AUTOPLAY_KEY = '@nowhere/pending-autoplay';
 const AUTOPLAY_MODE_KEY = '@nowhere/autoplay-mode-enabled';
+const MUSIC_MAP_TRACK_PLAYLISTS_KEY = '@nowhere/music-map-track-playlists-v1';
 
 export const AUTOPLAY_COOLDOWN_MS = 30 * 60 * 1000;
 export const GEOFENCE_REGION_LIMIT_IOS = 20;
@@ -42,6 +43,79 @@ function normalizePlayTarget(target = {}) {
     album: target.album || '',
     artworkUrl: target.artworkUrl || target.albumArtUrl || '',
     durationMs: target.durationMs || 0,
+  };
+}
+
+function normalizeInternalTrack(track = {}) {
+  const spotifyUri = track.spotifyUri || (typeof track.uri === 'string' && track.uri.startsWith('spotify:') ? track.uri : '');
+  const title = track.title || track.name || '';
+  const artist = track.artist || track.artistName || '';
+  if (!spotifyUri || !title) {
+    return null;
+  }
+  return {
+    type: 'track',
+    provider: 'spotify',
+    id: track.id || track.trackId || spotifyUri,
+    spotifyUri,
+    uri: spotifyUri,
+    title,
+    artist,
+    album: track.album || track.albumName || '',
+    artworkUrl: track.artworkUrl || track.albumArtUrl || '',
+    durationMs: track.durationMs || 0,
+  };
+}
+
+async function readMusicMapTrackPlaylists() {
+  const raw = await AsyncStorage.getItem(MUSIC_MAP_TRACK_PLAYLISTS_KEY);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+export async function resolveAutoPlayPlaybackTarget(target = {}) {
+  const normalizedTarget = normalizePlayTarget(target);
+  if (!normalizedTarget) {
+    return null;
+  }
+
+  const isInternalPlaylist = normalizedTarget.type === 'playlist' && !normalizedTarget.spotifyUri;
+  if (!isInternalPlaylist) {
+    return {
+      target: normalizedTarget,
+      track: normalizedTarget,
+      queue: [normalizedTarget],
+    };
+  }
+
+  const playlists = await readMusicMapTrackPlaylists();
+  const playlist = playlists.find((item) => item?.id === normalizedTarget.id);
+  const queue = (Array.isArray(playlist?.tracks) ? playlist.tracks : [])
+    .map(normalizeInternalTrack)
+    .filter(Boolean);
+  if (!queue.length) {
+    return {
+      target: normalizedTarget,
+      track: normalizedTarget,
+      queue: [normalizedTarget],
+    };
+  }
+
+  return {
+    target: {
+      ...normalizedTarget,
+      title: playlist.name || normalizedTarget.title,
+      artworkUrl: queue[0]?.artworkUrl || normalizedTarget.artworkUrl,
+    },
+    track: queue[0],
+    queue,
   };
 }
 

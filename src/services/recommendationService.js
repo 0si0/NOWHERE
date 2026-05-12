@@ -1,14 +1,16 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { TIME_MOODS } from '../constants';
 import { resolveAlbumArtwork } from './albumArtworkService';
-import { callCloudFunction, getListeningEvents, getOrCreateAppUserId } from './firebaseService';
+import { callCloudFunction, callCloudFunctionOptionalAuth, getListeningEvents, getOrCreateAppUserId } from './firebaseService';
 import { buildListeningContext } from './listeningHistoryService';
 import { musicPlayerService } from './musicPlayerService';
 
 const CACHE_KEY = '@nowhere/recommendation-slots-cache';
-const CACHE_VERSION = 9;
+const CACHE_VERSION = 17;
 const CACHE_TTL_MS = 10 * 60 * 1000;
+const SPOTIFY_REQUESTED_TREND_PLAYLIST_ID = '37i9dQZEVXbJZGli0rRP3r';
 const SPOTIFY_KR_TOP_50_PLAYLIST_ID = '37i9dQZEVXbNxXF4SkHj9F';
+const RECOMMENDATION_LOG_PREFIX = '[NOWHERE Recommendation]';
 
 export const RECOMMENDATION_SLOT_TYPES = ['taste', 'time', 'place', 'weather', 'challenge'];
 
@@ -20,8 +22,122 @@ const SLOT_META = {
   challenge: { sourceLabel: '오늘은 어떤 곡에 도전해볼까요?', title: 'CHALLENGE' },
 };
 
+const SITUATION_RECOMMENDATION_CANDIDATES = {
+  weather: {
+    rain: [
+      { title: '비도 오고 그래서', artist: '헤이즈 신용재' },
+      { title: '비가 오는 날엔', artist: '비스트' },
+      { title: '우산', artist: '에픽하이 윤하' },
+      { title: '비 오는 날 듣기 좋은 노래', artist: '에픽하이 Colde' },
+      { title: 'Rain Drop', artist: '아이유' },
+      { title: '소나기', artist: '아이오아이' },
+      { title: '비', artist: '폴킴' },
+      { title: '비가 와', artist: '소유 백현' },
+      { title: '잠 못 드는 밤 비는 내리고', artist: '김건모' },
+      { title: 'Rain', artist: '태연' },
+    ],
+    cloudy: [
+      { title: '구름', artist: '로시' },
+      { title: '가끔', artist: '크러쉬' },
+      { title: '미워', artist: '크러쉬' },
+      { title: '와르르', artist: 'Colde' },
+      { title: '나의 사춘기에게', artist: '볼빨간사춘기' },
+      { title: '스토커', artist: '10CM' },
+      { title: '그때 헤어지면 돼', artist: '로이킴' },
+      { title: '어떻게 이별까지 사랑하겠어, 널 사랑하는 거지', artist: 'AKMU' },
+      { title: '한숨', artist: '이하이' },
+      { title: 'Square', artist: '백예린' },
+      { title: '너의 의미', artist: '아이유 김창완' },
+    ],
+    clear: [
+      { title: 'Blueming', artist: '아이유' },
+      { title: '봄날', artist: '방탄소년단' },
+      { title: 'Dynamite', artist: '방탄소년단' },
+      { title: 'LOVE DIVE', artist: 'IVE' },
+      { title: 'Hype Boy', artist: 'NewJeans' },
+      { title: 'Super Shy', artist: 'NewJeans' },
+      { title: '여행', artist: '볼빨간사춘기' },
+      { title: '낙하', artist: 'AKMU 아이유' },
+    ],
+    snow: [
+      { title: '첫눈', artist: 'EXO' },
+      { title: '겨울잠', artist: '아이유' },
+      { title: 'Snowman', artist: '장나라' },
+      { title: '눈의 꽃', artist: '박효신' },
+      { title: 'Must Have Love', artist: 'SG워너비 브라운아이드걸스' },
+      { title: '크리스마스니까', artist: '성시경 박효신 이석훈 서인국 빅스' },
+      { title: 'December, 2014', artist: 'EXO' },
+      { title: '첫눈처럼 너에게 가겠다', artist: '에일리' },
+      { title: 'Winter Flower', artist: '윤하 RM' },
+      { title: 'Merry & Happy', artist: 'TWICE' },
+    ],
+  },
+  time: {
+    morning: [
+      { title: '파이팅 해야지', artist: '부석순 이영지' },
+      { title: '좋은 날', artist: '아이유' },
+      { title: '시작', artist: '가호' },
+      { title: 'Hello Future', artist: 'NCT DREAM' },
+      { title: '아로하', artist: '조정석' },
+      { title: 'I AM', artist: 'IVE' },
+      { title: 'Feel Special', artist: 'TWICE' },
+      { title: 'Dolphin', artist: '오마이걸' },
+      { title: 'Celebrity', artist: '아이유' },
+      { title: '에잇', artist: '아이유 SUGA' },
+    ],
+    lunch: [
+      { title: 'Lunch', artist: '부석순' },
+      { title: 'ASAP', artist: 'STAYC' },
+      { title: 'After LIKE', artist: 'IVE' },
+      { title: 'Attention', artist: 'NewJeans' },
+      { title: 'CHEER UP', artist: 'TWICE' },
+      { title: 'Power Up', artist: 'Red Velvet' },
+      { title: 'Very Nice', artist: '세븐틴' },
+      { title: 'Love Lee', artist: 'AKMU' },
+      { title: 'Any Song', artist: '지코' },
+      { title: '봄 사랑 벚꽃 말고', artist: 'HIGH4 아이유' },
+    ],
+    night: [
+      { title: '밤편지', artist: '아이유' },
+      { title: '7시에 들어줘', artist: '부석순 Peder Elias' },
+      { title: '야생화', artist: '박효신' },
+      { title: '취기를 빌려', artist: '산들' },
+      { title: '늦은 밤 너의 집 앞 골목길에서', artist: '노을' },
+      { title: '오늘도 빛나는 너에게', artist: '마크툽 이라온' },
+      { title: 'all of my life', artist: '박원' },
+      { title: '기다린 만큼, 더', artist: '검정치마' },
+      { title: 'Instagram', artist: 'DEAN' },
+      { title: 'D', artist: 'DEAN 개코' },
+    ],
+  },
+};
+
 function trackKey(track = {}) {
   return track.spotifyUri || `${track.title || ''}::${track.artist || ''}`.toLowerCase();
+}
+
+function logRecommendationDebug(message, details = {}) {
+  if (typeof console?.info !== 'function') {
+    return;
+  }
+  console.info(RECOMMENDATION_LOG_PREFIX, message, details);
+}
+
+function getErrorStatus(error) {
+  if (!error) return 'unknown';
+  const rawStatus = error.status || error.statusCode || error.code || error.nativeStatus || '';
+  if (rawStatus) return rawStatus;
+  const message = String(error.message || error || '');
+  const match = message.match(/\b(401|403|429|500|502|503)\b/);
+  return match?.[1] || 'unknown';
+}
+
+function logRecommendationApiFailure(endpoint, error) {
+  logRecommendationDebug('api_failure', {
+    endpoint,
+    status: getErrorStatus(error),
+    message: String(error?.message || error || 'unknown error'),
+  });
 }
 
 function normalizeIdentity(value) {
@@ -93,6 +209,10 @@ function addTrackIdentity(usedKeys, track = {}) {
   getTrackIdentityKeys(track).forEach((key) => usedKeys.add(key));
 }
 
+function removeTrackIdentity(usedKeys, track = {}) {
+  getTrackIdentityKeys(track).forEach((key) => usedKeys.delete(key));
+}
+
 function isTrackExcluded(track = {}, usedKeys = new Set()) {
   return getTrackIdentityKeys(track).some((key) => usedKeys.has(key));
 }
@@ -113,40 +233,140 @@ function hasSpotifyTrackIdentity(track = {}) {
   return spotifyUri.startsWith('spotify:track:');
 }
 
+function getAlbumArtworkUrl(track = {}) {
+  return String(track.artworkUrl || track.albumArtUrl || '').trim();
+}
+
+function getDisplayTitle(track = {}) {
+  return String(track.displayTitle || track.localizedTitle || track.title || track.name || '').trim();
+}
+
+function getDisplayArtist(track = {}) {
+  return String(track.displayArtist || track.localizedArtist || track.artist || track.artistName || '').trim();
+}
+
+function hasRequiredAlbumArtwork(track = {}) {
+  return Boolean(getAlbumArtworkUrl(track));
+}
+
+function shouldRequestKoreanDisplayName(track = {}) {
+  const title = getDisplayTitle(track);
+  const artist = getDisplayArtist(track);
+  const text = `${title} ${artist}`;
+  return Boolean(
+    hasSpotifyTrackIdentity(track) &&
+    title &&
+    !/[가-힣]/.test(text)
+  );
+}
+
+async function applyKoreanDisplayNames(slots = []) {
+  const targets = slots
+    .filter((slot) => (
+      slot &&
+      !slot.isPending &&
+      !slot.isActionRequired &&
+      shouldRequestKoreanDisplayName(slot)
+    ))
+    .slice(0, 8);
+
+  if (!targets.length) {
+    return slots;
+  }
+
+  try {
+    const response = await callCloudFunctionOptionalAuth('localizeSpotifyDisplayNames', {
+      tracks: targets.map((slot) => ({
+        key: slot.spotifyUri || slot.id,
+        title: slot.spotifyTitle || slot.title,
+        artist: slot.spotifyArtist || slot.artist,
+        album: slot.album || '',
+      })),
+    });
+    const localizedItems = Array.isArray(response?.tracks) ? response.tracks : [];
+    const localizedByKey = new Map(
+      localizedItems
+        .filter((item) => item?.key && (item.displayTitle || item.displayArtist))
+        .map((item) => [String(item.key), item])
+    );
+
+    return slots.map((slot) => {
+      const localized = localizedByKey.get(String(slot.spotifyUri || slot.id));
+      if (!localized) {
+        return slot;
+      }
+
+      const displayTitle = String(localized.displayTitle || '').trim();
+      const displayArtist = String(localized.displayArtist || '').trim();
+      const nextTitle = displayTitle || slot.title;
+      const nextArtist = displayArtist || slot.artist;
+      return {
+        ...slot,
+        spotifyTitle: slot.spotifyTitle || slot.title,
+        spotifyArtist: slot.spotifyArtist || slot.artist,
+        title: nextTitle,
+        artist: nextArtist,
+        displayTitle: nextTitle,
+        displayArtist: nextArtist,
+      };
+    });
+  } catch (error) {
+    logRecommendationApiFailure('firebase:localizeSpotifyDisplayNames', error);
+    return slots;
+  }
+}
+
+function isRenderableRecommendationSlot(slot = {}) {
+  return Boolean(
+    slot &&
+    PLAYABLE_SLOT_TYPES.includes(slot.slotType) &&
+    !slot.isActionRequired &&
+    !slot.isPending &&
+    isUsefulTrack(slot) &&
+    hasSpotifyTrackIdentity(slot) &&
+    hasRequiredAlbumArtwork(slot)
+  );
+}
+
 function normalizeEventTrack(track = {}) {
+  const artworkUrl = getAlbumArtworkUrl(track);
   return {
     type: track.type === 'playlist' ? 'playlist' : 'track',
     provider: track.provider || 'spotify',
     id: track.id || track.spotifyUri || trackKey(track),
     spotifyUri: track.spotifyUri || '',
     uri: track.spotifyUri || track.uri || '',
-    title: track.title || 'Unknown Track',
-    artist: track.artist || '',
+    title: getDisplayTitle(track) || 'Unknown Track',
+    artist: getDisplayArtist(track),
     album: track.album || '',
-    artworkUrl: track.artworkUrl || '',
+    artworkUrl,
     durationMs: track.durationMs || 0,
   };
 }
 
 function buildSlot(slotType, track, reason, extra = {}) {
   const meta = SLOT_META[slotType];
+  const artworkUrl = getAlbumArtworkUrl(track);
+  const title = getDisplayTitle(track);
+  const artist = getDisplayArtist(track);
   return {
     id: `${slotType}-${trackKey(track) || Date.now()}`,
     slotType,
     source: slotType,
     sourceLabel: extra.sourceLabel || meta.sourceLabel,
-    title: track.title || meta.title,
-    artist: track.artist || '',
+    title: title || meta.title,
+    artist,
     album: track.album || '',
     color: track.color || '#B99BFF',
     spotifyUri: track.spotifyUri || '',
     uri: track.spotifyUri || track.uri || '',
-    artworkUrl: track.artworkUrl || '',
+    artworkUrl,
     reason: reason || extra.reason || '',
-    searchQuery: extra.searchQuery || [track.title, track.artist].filter(Boolean).join(' '),
+    searchQuery: extra.searchQuery || [title || track.title, artist || track.artist].filter(Boolean).join(' '),
     isChallenge: slotType === 'challenge',
     isFallback: Boolean(extra.isFallback),
     isPersonalized: Boolean(extra.isPersonalized),
+    isSituational: Boolean(extra.isSituational),
     isPending: Boolean(extra.isPending),
   };
 }
@@ -162,6 +382,43 @@ async function hydrateSlotArtwork(slot) {
 
 async function hydrateSlotsArtwork(slots = []) {
   return Promise.all(slots.map(hydrateSlotArtwork));
+}
+
+async function enforceArtworkForPlayableSlots(slotsByType, usedKeys, stageName) {
+  let removedCount = 0;
+  let hydratedCount = 0;
+
+  for (const slotType of PLAYABLE_SLOT_TYPES) {
+    const slot = slotsByType[slotType];
+    if (!slot) {
+      continue;
+    }
+
+    const hydratedSlot = await hydrateSlotArtwork(slot);
+    if (hasRequiredAlbumArtwork(hydratedSlot)) {
+      if (!hasRequiredAlbumArtwork(slot)) {
+        hydratedCount += 1;
+      }
+      slotsByType[slotType] = {
+        ...hydratedSlot,
+        artworkUrl: getAlbumArtworkUrl(hydratedSlot),
+      };
+      continue;
+    }
+
+    removedCount += 1;
+    removeTrackIdentity(usedKeys, slot);
+    delete slotsByType[slotType];
+  }
+
+  logRecommendationDebug('artwork_filter_result', {
+    stage: stageName,
+    removedWithoutAlbumArt: removedCount,
+    hydratedAlbumArt: hydratedCount,
+    playableWithAlbumArt: Object.keys(slotsByType).length,
+  });
+
+  return removedCount;
 }
 
 async function cacheAndReturnRecommendations(cacheKey, slots) {
@@ -184,6 +441,127 @@ function getSlotSourceLabel(slotType, context = {}) {
   return SLOT_META[slotType]?.sourceLabel || '추천';
 }
 
+function getWeatherSituationKey(context = {}) {
+  const weatherText = [
+    context.weatherCondition,
+    context.weatherMood,
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  if (/snow|눈/.test(weatherText)) return 'snow';
+  if (/rain|drizzle|thunderstorm|비|이슬비|폭풍/.test(weatherText)) return 'rain';
+  if (/cloud|흐림/.test(weatherText)) return 'cloudy';
+  if (/clear|맑음/.test(weatherText)) return 'clear';
+  return '';
+}
+
+function getTimeSituationKey(context = {}) {
+  if (context.timeBucket === 'morning') return 'morning';
+  if (context.timeBucket === 'afternoon') return 'lunch';
+  if (['evening', 'night', 'lateNight'].includes(context.timeBucket)) return 'night';
+
+  const hour = Number.isInteger(context.hour) ? context.hour : new Date().getHours();
+  if (hour >= 5 && hour < 11) return 'morning';
+  if (hour >= 11 && hour < 18) return 'lunch';
+  return 'night';
+}
+
+function getSituationCandidates(slotType, context = {}) {
+  if (slotType === 'weather') {
+    const key = getWeatherSituationKey(context);
+    return key ? SITUATION_RECOMMENDATION_CANDIDATES.weather[key] || [] : [];
+  }
+  if (slotType === 'time') {
+    const key = getTimeSituationKey(context);
+    return key ? SITUATION_RECOMMENDATION_CANDIDATES.time[key] || [] : [];
+  }
+  return [];
+}
+
+function rotateSituationCandidates(candidates = [], refreshSeed = 0, salt = 0) {
+  if (!candidates.length) {
+    return [];
+  }
+  const startIndex = seededIndex(refreshSeed, salt, candidates.length);
+  return [...candidates.slice(startIndex), ...candidates.slice(0, startIndex)];
+}
+
+async function searchSituationCandidateTrack(candidate = {}, usedKeys = new Set()) {
+  const query = [candidate.title, candidate.artist].filter(Boolean).join(' ');
+  if (!query) {
+    return null;
+  }
+
+  try {
+    const response = await callCloudFunctionOptionalAuth('searchSpotifyTracks', {
+      query,
+      limit: 8,
+    });
+    const matches = (Array.isArray(response?.tracks) ? response.tracks : [])
+      .filter((track) => (
+        isUsefulTrack(track) &&
+        hasSpotifyTrackIdentity(track) &&
+        hasRequiredAlbumArtwork(track) &&
+        !isTrackExcluded(track, usedKeys)
+      ))
+      .map((track) => ({
+        track,
+        score: scoreSearchResultForSlot(track, candidate),
+      }))
+      .sort((left, right) => right.score - left.score);
+
+    const matchedTrack = (matches.find((match) => match.score >= 200) || matches[0])?.track || null;
+    if (!matchedTrack) {
+      return null;
+    }
+    return {
+      ...matchedTrack,
+      title: candidate.title || matchedTrack.title,
+      artist: candidate.artist || matchedTrack.artist,
+      displayTitle: candidate.title || matchedTrack.displayTitle || matchedTrack.title,
+      displayArtist: candidate.artist || matchedTrack.displayArtist || matchedTrack.artist,
+      spotifyTitle: matchedTrack.title,
+      spotifyArtist: matchedTrack.artist,
+    };
+  } catch (error) {
+    logRecommendationApiFailure(`firebase:searchSpotifyTracks:${query}`, error);
+    return null;
+  }
+}
+
+async function resolveSituationTrack(slotType, context = {}, usedKeys = new Set(), refreshSeed = 0) {
+  const candidates = getSituationCandidates(slotType, context);
+  const rotatedCandidates = rotateSituationCandidates(
+    candidates,
+    refreshSeed,
+    slotType === 'weather' ? 41 : 29
+  );
+
+  for (const candidate of rotatedCandidates) {
+    const track = await searchSituationCandidateTrack(candidate, usedKeys);
+    if (track) {
+      return track;
+    }
+  }
+  return null;
+}
+
+async function fillSituationSlots(slotsByType, usedKeys, context = {}, refreshSeed = 0) {
+  const situationSlotTypes = ['time', 'weather'];
+  for (const slotType of situationSlotTypes) {
+    if (slotsByType[slotType]) {
+      continue;
+    }
+    const track = await resolveSituationTrack(slotType, context, usedKeys, refreshSeed);
+    if (track) {
+      setPlayableSlot(
+        slotsByType,
+        usedKeys,
+        buildContextSourceSlot(slotType, track, context, 'situation')
+      );
+    }
+  }
+}
+
 function buildChallengeSearchQuery(challenge = {}, candidateQuery = '') {
   return [
     candidateQuery,
@@ -198,12 +576,95 @@ function shouldTrustChallengeTrack(track = {}) {
   return isUsefulTrack(track);
 }
 
-async function isSpotifyAuthorized() {
+function buildChallengeOwnerSearchQueries(track = {}, challenge = {}) {
+  const title = getDisplayTitle(track);
+  const artist = getDisplayArtist(track);
+  const baseQuery = [title || track.title, artist || track.artist].filter(Boolean).join(' ');
+  return [
+    track.searchQuery,
+    baseQuery,
+    title,
+    buildChallengeSearchQuery(challenge, baseQuery),
+  ]
+    .map((query) => String(query || '').trim())
+    .filter((query, index, queries) => query.length >= 2 && queries.indexOf(query) === index);
+}
+
+async function searchChallengeTrackWithOwnerApi(track = {}, challenge = {}) {
+  const slot = buildSlot('challenge', track, track.reason || '선택한 조합으로 찾은 새로운 추천이에요.', {
+    searchQuery: track.searchQuery,
+  });
+  const queries = buildChallengeOwnerSearchQueries(track, challenge);
+
+  for (const query of queries) {
+    try {
+      const response = await callCloudFunctionOptionalAuth('searchSpotifyTracks', {
+        query,
+        limit: 10,
+      });
+      const match = (Array.isArray(response?.tracks) ? response.tracks : [])
+        .filter((candidate) => (
+          isUsefulTrack(candidate) &&
+          hasSpotifyTrackIdentity(candidate) &&
+          hasRequiredAlbumArtwork(candidate)
+        ))
+        .map((candidate) => ({
+          track: candidate,
+          score: scoreSearchResultForSlot(candidate, slot),
+        }))
+        .sort((left, right) => right.score - left.score)[0]?.track;
+
+      if (match) {
+        return {
+          ...slot,
+          ...match,
+          id: `challenge-${match.spotifyUri || match.id || trackKey(match)}`,
+          slotType: 'challenge',
+          source: 'challenge',
+          sourceLabel: SLOT_META.challenge.sourceLabel,
+          title: track.displayTitle || track.title || match.displayTitle || match.title,
+          artist: track.displayArtist || track.artist || match.displayArtist || match.artist,
+          displayTitle: track.displayTitle || track.title || match.displayTitle || match.title,
+          displayArtist: track.displayArtist || track.artist || match.displayArtist || match.artist,
+          spotifyTitle: match.title,
+          spotifyArtist: match.artist,
+          spotifyUri: match.spotifyUri,
+          uri: match.spotifyUri || match.uri || '',
+          artworkUrl: getAlbumArtworkUrl(match),
+          durationMs: match.durationMs || 0,
+          album: match.album || '',
+          reason: track.reason || slot.reason,
+          searchQuery: query,
+          isChallenge: false,
+        };
+      }
+    } catch (error) {
+      logRecommendationApiFailure(`firebase:searchSpotifyTracks:challenge:${query}`, error);
+    }
+  }
+
+  return null;
+}
+
+async function getSpotifyAuthorizationSnapshot() {
   try {
     const state = await musicPlayerService.getState();
-    return state?.authorizationStatus === 'authorized' || state?.isAuthorized === true;
+    return {
+      isConnected: Boolean(state?.isConnected),
+      isAuthorized: state?.authorizationStatus === 'authorized' || state?.isAuthorized === true,
+      authorizationStatus: state?.authorizationStatus || 'unknown',
+      accessTokenPresent: state?.authorizationStatus === 'authorized' || state?.isAuthorized === true,
+      playbackStatus: state?.playbackStatus || 'unknown',
+    };
   } catch (error) {
-    return false;
+    logRecommendationApiFailure('spotify:get-state', error);
+    return {
+      isConnected: false,
+      isAuthorized: false,
+      authorizationStatus: 'unknown',
+      accessTokenPresent: false,
+      playbackStatus: 'unknown',
+    };
   }
 }
 
@@ -224,7 +685,12 @@ async function resolveSlotWithSpotify(slot, searchQuery = '', usedKeys = new Set
   try {
     const results = await musicPlayerService.search(query, 10);
     const match = results
-      .filter((track) => isUsefulTrack(track) && hasSpotifyTrackIdentity(track) && !isTrackExcluded(track, usedKeys))
+      .filter((track) => (
+        isUsefulTrack(track) &&
+        hasSpotifyTrackIdentity(track) &&
+        hasRequiredAlbumArtwork(track) &&
+        !isTrackExcluded(track, usedKeys)
+      ))
       .map((track) => ({ track, score: scoreSearchResultForSlot(track, slot) }))
       .filter((candidate) => candidate.score >= 200)
       .sort((left, right) => right.score - left.score)[0]?.track;
@@ -239,11 +705,16 @@ async function resolveSlotWithSpotify(slot, searchQuery = '', usedKeys = new Set
       slotType: slot.slotType,
       source: slot.source,
       sourceLabel: slot.sourceLabel,
+      title: slot.displayTitle || slot.title || match.title,
+      artist: slot.displayArtist || slot.artist || match.artist,
+      displayTitle: slot.displayTitle || slot.title || match.displayTitle || match.title,
+      displayArtist: slot.displayArtist || slot.artist || match.displayArtist || match.artist,
       reason: slot.reason,
       searchQuery: query,
       isChallenge: slot.isChallenge,
       isFallback: slot.isFallback,
       isPersonalized: slot.isPersonalized,
+      isSituational: slot.isSituational,
     };
   } catch (error) {
     return slot;
@@ -251,10 +722,6 @@ async function resolveSlotWithSpotify(slot, searchQuery = '', usedKeys = new Set
 }
 
 async function resolveSlotsWithSpotify(slots = [], excludedKeys = new Set()) {
-  if (!(await isSpotifyAuthorized())) {
-    return slots;
-  }
-
   const usedKeys = new Set(excludedKeys);
   const resolvedSlots = [];
 
@@ -265,9 +732,15 @@ async function resolveSlotsWithSpotify(slots = [], excludedKeys = new Set()) {
     }
 
     const resolved = await resolveSlotWithSpotify(slot, slot.searchQuery, usedKeys);
-    if (!isTrackExcluded(resolved, usedKeys)) {
-      addTrackIdentity(usedKeys, resolved);
-      resolvedSlots.push(resolved);
+    const resolvedWithArtwork = hasRequiredAlbumArtwork(resolved)
+      ? resolved
+      : await hydrateSlotArtwork(resolved);
+    if (!isTrackExcluded(resolvedWithArtwork, usedKeys) && hasRequiredAlbumArtwork(resolvedWithArtwork)) {
+      addTrackIdentity(usedKeys, resolvedWithArtwork);
+      resolvedSlots.push({
+        ...resolvedWithArtwork,
+        artworkUrl: getAlbumArtworkUrl(resolvedWithArtwork),
+      });
     } else {
       resolvedSlots.push({ ...slot, spotifyUri: '', uri: '', artworkUrl: '' });
     }
@@ -346,11 +819,11 @@ function buildUnavailableSlot(slotType, context = {}) {
   const slot = buildSlot(
     slotType,
     {
-      title: 'Spotify 연결 필요',
-      artist: '권한 확인 후 추천을 불러옵니다',
+      title: '추천 준비 중',
+      artist: 'NOWHERE 기록과 차트를 확인하고 있어요',
       color: '#A98791',
     },
-    'Spotify 권한과 실행 상태를 확인해야 추천을 만들 수 있어요.',
+    'NOWHERE 기록, 좋아하는 아티스트, 한국 Top50에서 추천을 다시 확인하고 있어요.',
     {
       sourceLabel: getSlotSourceLabel(slotType, context),
       isActionRequired: true,
@@ -409,6 +882,42 @@ function buildUserDataSlots(events, context, usedKeys = new Set()) {
   }
 
   return slots;
+}
+
+function fillSlotsFromListeningHistory(slotsByType, usedKeys, events = [], context = {}) {
+  const scored = scoreEvents(events)
+    .filter((candidate) => (
+      candidate?.track &&
+      hasSpotifyTrackIdentity(candidate.track) &&
+      hasRequiredAlbumArtwork(candidate.track)
+    ));
+
+  if (!scored.length) {
+    return;
+  }
+
+  PLAYABLE_SLOT_TYPES.forEach((slotType) => {
+    if (slotsByType[slotType]) {
+      return;
+    }
+    const picked = pickUniqueScored(scored, usedKeys);
+    if (!picked?.track) {
+      return;
+    }
+    setPlayableSlot(
+      slotsByType,
+      usedKeys,
+      buildSlot(
+        slotType,
+        picked.track,
+        'NOWHERE에 저장된 청취 기록에서 다시 꺼낸 곡이에요.',
+        {
+          isPersonalized: true,
+          sourceLabel: getSlotSourceLabel(slotType, context),
+        }
+      )
+    );
+  });
 }
 
 const PLAYABLE_SLOT_TYPES = ['taste', 'time', 'place', 'weather'];
@@ -510,60 +1019,46 @@ function pickContextTrack(tracks, context, slotType, usedKeys, refreshSeed, slot
   return pool[seededIndex(refreshSeed, salt, pool.length)].track;
 }
 
-async function getSpotifyTopTracks(limit = 50) {
-  try {
-    return musicPlayerService.getUserTopTracks(limit);
-  } catch (error) {
-    return [];
-  }
-}
-
-async function getSpotifyRecentlyPlayedTracks(limit = 50) {
-  try {
-    return musicPlayerService.getRecentlyPlayedTracks(limit);
-  } catch (error) {
-    return [];
-  }
-}
-
-async function getSpotifyPersonalTracks(limit = 50) {
-  const [topTracks, recentlyPlayedTracks] = await Promise.all([
-    getSpotifyTopTracks(limit),
-    getSpotifyRecentlyPlayedTracks(limit),
-  ]);
-
-  return uniqueTracks([
-    ...topTracks.map((track, index) => ({
-      ...track,
-      rank: index + 1,
-      isSpotifyTopTrack: true,
-    })),
-    ...recentlyPlayedTracks.map((track, index) => ({
-      ...track,
-      rank: Math.min(limit, index + 1),
-      isRecentlyPlayed: true,
-    })),
-  ]);
-}
-
 async function getSpotifyKoreaChartTracks(limit = 50) {
   try {
     return musicPlayerService.getPlaylistTracks(SPOTIFY_KR_TOP_50_PLAYLIST_ID, limit);
   } catch (error) {
+    logRecommendationApiFailure('spotify:playlist:korea-top-50', error);
     return [];
   }
 }
 
+async function getDemoOwnerSpotifyTracks(limit = 50) {
+  try {
+    const response = await callCloudFunctionOptionalAuth('getDemoSpotifyTracks', { limit });
+    const chartTracks = Array.isArray(response?.chartTracks) ? response.chartTracks : [];
+    logRecommendationDebug('spotify_owner_demo_result', {
+      chartCount: chartTracks.length,
+      requestedPlaylistId: response?.requestedPlaylistId || SPOTIFY_REQUESTED_TREND_PLAYLIST_ID,
+      playlistId: response?.playlistId || '',
+    });
+    return {
+      chartTracks,
+      playlistId: response?.playlistId || '',
+      requestedPlaylistId: response?.requestedPlaylistId || SPOTIFY_REQUESTED_TREND_PLAYLIST_ID,
+    };
+  } catch (error) {
+    logRecommendationApiFailure('firebase:getDemoSpotifyTracks', error);
+    return { chartTracks: [], playlistId: '', requestedPlaylistId: SPOTIFY_REQUESTED_TREND_PLAYLIST_ID };
+  }
+}
+
 function buildContextSourceSlot(slotType, track, context, mode) {
-  const isPersonalized = mode === 'spotify-top';
+  const isPersonalized = mode === 'favorite-artist';
+  const isSituational = mode === 'situation';
   const isFallback = mode === 'trend';
   const trendPrefix = 'Spotify 대한민국 Top 50에서';
   const reasonByMode = {
-    'spotify-top': {
-      taste: 'Spotify 이용 통계에서 자주 들은 곡을 기반으로 추천했어요.',
-      time: `${TIME_MOODS[context.timeBucket]?.label || '지금 시간'}에 어울리는 Spotify 취향 데이터를 골랐어요.`,
-      place: `${context.placeName || '현재 공간'}에 어울리는 Spotify 취향 데이터를 골랐어요.`,
-      weather: `${context.weatherMood || '오늘 날씨'}에 맞는 Spotify 취향 데이터를 골랐어요.`,
+    'favorite-artist': {
+      taste: `${track.sourceArtistName || track.artist || '좋아하는 아티스트'}의 인기곡을 골랐어요.`,
+      time: `${TIME_MOODS[context.timeBucket]?.label || '지금 시간'}에 어울리는 좋아하는 아티스트의 곡이에요.`,
+      place: `${context.placeName || '현재 공간'}에 어울리는 좋아하는 아티스트의 곡이에요.`,
+      weather: `${context.weatherMood || '오늘 날씨'}와 잘 맞는 좋아하는 아티스트의 곡이에요.`,
     },
     trend: {
       taste: `${trendPrefix} 최근 흐름이 좋은 곡을 골랐어요.`,
@@ -571,11 +1066,16 @@ function buildContextSourceSlot(slotType, track, context, mode) {
       place: `${trendPrefix} ${context.placeName || '현재 공간'} 분위기에 맞는 곡을 골랐어요.`,
       weather: `${trendPrefix} ${context.weatherMood || '오늘 날씨'}와 어울리는 곡을 골랐어요.`,
     },
+    situation: {
+      time: `${TIME_MOODS[context.timeBucket]?.label || '지금 시간'}에 한국에서 자주 찾는 곡이에요.`,
+      weather: `${context.weatherMood || '오늘 날씨'}에 한국에서 자주 찾는 곡이에요.`,
+    },
   };
 
   return buildSlot(slotType, track, reasonByMode[mode]?.[slotType] || '', {
     isPersonalized,
     isFallback,
+    isSituational,
     sourceLabel: getSlotSourceLabel(slotType, context),
   });
 }
@@ -586,7 +1086,7 @@ function pickSourceTrackForSlot(tracks = [], context, slotType, usedKeys, refres
     .map((track, index) => ({
       ...track,
       rank: Number.isFinite(track.rank) ? track.rank : index + 1,
-      isSpotifyTopTrack: mode === 'spotify-top',
+      isSpotifyTopTrack: mode === 'favorite-artist',
     }));
 
   return pickContextTrack(normalizedTracks, context, slotType, usedKeys, refreshSeed, slotOffset);
@@ -647,6 +1147,10 @@ async function readCachedRecommendations(cacheKey) {
       await AsyncStorage.removeItem(CACHE_KEY);
       return null;
     }
+    if (!parsed.slots.some(isRenderableRecommendationSlot)) {
+      await AsyncStorage.removeItem(CACHE_KEY);
+      return null;
+    }
     return parsed.slots;
   } catch (error) {
     await AsyncStorage.removeItem(CACHE_KEY);
@@ -654,16 +1158,26 @@ async function readCachedRecommendations(cacheKey) {
   }
 }
 
-async function writeCachedRecommendations(cacheKey, slots) {
-  const slotsWithoutArtworkCache = slots.map((slot) => ({
-    ...slot,
-    artworkUrl: '',
-  }));
+async function readLastRenderableCachedRecommendations() {
+  const raw = await AsyncStorage.getItem(CACHE_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    const slots = Array.isArray(parsed.slots) ? parsed.slots : [];
+    if (!slots.some(isRenderableRecommendationSlot)) {
+      return null;
+    }
+    return slots;
+  } catch (error) {
+    return null;
+  }
+}
 
+async function writeCachedRecommendations(cacheKey, slots) {
   await AsyncStorage.setItem(CACHE_KEY, JSON.stringify({
     version: CACHE_VERSION,
     cacheKey,
-    slots: slotsWithoutArtworkCache,
+    slots,
     createdAt: Date.now(),
   }));
 }
@@ -714,7 +1228,7 @@ export async function getRecommendationSlots({
     const cached = await readCachedRecommendations(cacheKey);
     if (cached) {
       const resolvedCachedSlots = await resolveSlotsWithSpotify(cached);
-      return hydrateSlotsArtwork(resolvedCachedSlots);
+      return hydrateSlotsArtwork(await applyKoreanDisplayNames(resolvedCachedSlots));
     }
   }
 
@@ -722,30 +1236,59 @@ export async function getRecommendationSlots({
   const usedKeys = new Set(excludedKeys);
   const slotsByType = {};
   const hasNowhereData = hasEnoughListeningData(events) || hasLikeSignal(events);
+  const spotifySnapshot = await getSpotifyAuthorizationSnapshot();
+
+  logRecommendationDebug('load_start', {
+    ownerId,
+    force,
+    spotifyConnected: spotifySnapshot.isConnected,
+    spotifyAuthorized: spotifySnapshot.isAuthorized,
+    spotifyAuthorizationStatus: spotifySnapshot.authorizationStatus,
+    accessTokenPresent: spotifySnapshot.accessTokenPresent,
+    listeningEventCount: events.length,
+  });
 
   if (hasNowhereData) {
     Object.values(buildUserDataSlots(events, context, usedKeys)).forEach((slot) => {
       setPlayableSlot(slotsByType, usedKeys, slot);
     });
   }
+  await enforceArtworkForPlayableSlots(slotsByType, usedKeys, 'nowhere-history');
+
+  logRecommendationDebug('nowhere_history_result', {
+    count: Object.keys(slotsByType).length,
+  });
+
+  const missingSituationSlots = ['time', 'weather'].filter((slotType) => !slotsByType[slotType]);
+  if (missingSituationSlots.length) {
+    await fillSituationSlots(slotsByType, usedKeys, context, refreshSeed);
+    await enforceArtworkForPlayableSlots(slotsByType, usedKeys, 'korean-situation');
+    logRecommendationDebug('korean_situation_result', {
+      requestedSlots: missingSituationSlots,
+      filledSlots: missingSituationSlots.filter((slotType) => Boolean(slotsByType[slotType])),
+      weatherSituationKey: getWeatherSituationKey(context),
+      timeSituationKey: getTimeSituationKey(context),
+    });
+  }
+
+  fillSlotsFromListeningHistory(slotsByType, usedKeys, events, context);
+  await enforceArtworkForPlayableSlots(slotsByType, usedKeys, 'nowhere-general-history');
+  logRecommendationDebug('nowhere_general_history_result', {
+    count: Object.keys(slotsByType).length,
+  });
 
   let missingSlots = PLAYABLE_SLOT_TYPES.filter((slotType) => !slotsByType[slotType]);
   if (missingSlots.length) {
-    const spotifyPersonalTracks = await getSpotifyPersonalTracks(50);
-    fillSlotsFromTracks(
-      slotsByType,
-      usedKeys,
-      spotifyPersonalTracks,
-      context,
+    const demoOwnerTracks = await getDemoOwnerSpotifyTracks(50);
+    const chartTracks = demoOwnerTracks?.chartTracks?.length
+      ? demoOwnerTracks.chartTracks
+      : await getSpotifyKoreaChartTracks(50);
+    logRecommendationDebug('spotify_top50_result', {
+      count: chartTracks.length,
+      requestedPlaylistId: SPOTIFY_REQUESTED_TREND_PLAYLIST_ID,
+      playlistId: demoOwnerTracks?.playlistId || SPOTIFY_KR_TOP_50_PLAYLIST_ID,
       missingSlots,
-      'spotify-top',
-      refreshSeed
-    );
-  }
-
-  missingSlots = PLAYABLE_SLOT_TYPES.filter((slotType) => !slotsByType[slotType]);
-  if (missingSlots.length) {
-    const chartTracks = await getSpotifyKoreaChartTracks(50);
+    });
     fillSlotsFromTracks(
       slotsByType,
       usedKeys,
@@ -755,9 +1298,34 @@ export async function getRecommendationSlots({
       'trend',
       refreshSeed
     );
+    await enforceArtworkForPlayableSlots(slotsByType, usedKeys, 'spotify-top50');
   }
 
-  const slots = orderedRecommendationSlots(slotsByType, context);
+  const slots = await applyKoreanDisplayNames(orderedRecommendationSlots(slotsByType, context));
+  const finalPlayableCount = slots.filter((slot) => (
+    slot &&
+    PLAYABLE_SLOT_TYPES.includes(slot.slotType) &&
+    !slot.isActionRequired &&
+    !slot.isPending &&
+    isUsefulTrack(slot) &&
+    hasRequiredAlbumArtwork(slot)
+  )).length;
+  logRecommendationDebug('final_result', {
+    playableCount: finalPlayableCount,
+    totalSlots: slots.length,
+    allPlayableHaveAlbumArt: finalPlayableCount === PLAYABLE_SLOT_TYPES.filter((slotType) => slotsByType[slotType]).length,
+  });
+
+  if (finalPlayableCount === 0) {
+    const cachedSlots = await readLastRenderableCachedRecommendations();
+    if (cachedSlots) {
+      logRecommendationDebug('last_renderable_cache_fallback', {
+        cachedPlayableCount: cachedSlots.filter(isRenderableRecommendationSlot).length,
+      });
+      return hydrateSlotsArtwork(cachedSlots);
+    }
+  }
+
   if (force) {
     return hydrateSlotsArtwork(slots);
   }
@@ -784,18 +1352,17 @@ export async function getChallengeRecommendation({
     });
     const track = response?.track || response?.recommendations?.[0];
     if (track?.title && shouldTrustChallengeTrack(track, challenge)) {
-      const slot = buildSlot('challenge', track, track.reason || '선택한 조합으로 찾은 새로운 추천이에요.', {
-        searchQuery: track.searchQuery,
-      });
-      const resolved = await resolveSlotWithSpotify(
-        { ...slot, isChallenge: false },
-        buildChallengeSearchQuery(challenge, slot.searchQuery || [track.title, track.artist].filter(Boolean).join(' '))
-      );
-      if (isUsefulTrack(resolved) && shouldTrustChallengeTrack(resolved, challenge)) {
-        const artworkUrl = resolved.artworkUrl || await resolveAlbumArtwork(resolved);
+      const resolved = await searchChallengeTrackWithOwnerApi(track, challenge);
+      if (
+        resolved &&
+        isUsefulTrack(resolved) &&
+        hasSpotifyTrackIdentity(resolved) &&
+        hasRequiredAlbumArtwork(resolved) &&
+        shouldTrustChallengeTrack(resolved, challenge)
+      ) {
+        const [localizedResolved] = await applyKoreanDisplayNames([resolved]);
         return {
-          ...resolved,
-          artworkUrl,
+          ...localizedResolved,
           slotType: 'challenge',
           source: 'challenge',
           sourceLabel: SLOT_META.challenge.sourceLabel,

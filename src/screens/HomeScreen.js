@@ -48,11 +48,11 @@ const SPOTIFY_REQUIRED_SLOT = {
   id: 'spotify-required-recommendation',
   slotType: 'taste',
   source: 'taste',
-  sourceLabel: 'Spotify 연결 필요',
-  title: 'Spotify 연결 필요',
-  artist: '권한 확인 후 추천을 불러옵니다',
+  sourceLabel: '추천 준비 중',
+  title: '추천 준비 중',
+  artist: 'NOWHERE 기록과 차트를 확인하고 있어요',
   color: '#A98791',
-  reason: 'Spotify 권한과 실행 상태를 확인해야 추천을 만들 수 있어요.',
+  reason: '추천 데이터를 불러오는 중입니다.',
   isActionRequired: true,
 };
 
@@ -75,6 +75,18 @@ const INITIAL_RECOMMENDATION_SLOTS = [
 ];
 
 const FALLBACK_TRACK = SPOTIFY_REQUIRED_SLOT;
+
+function isSpotifyForbiddenError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('forbidden') || message.includes('403');
+}
+
+function getSpotifyActionMessage(error, fallback = 'Spotify 앱에서 다시 시도해주세요.') {
+  if (isSpotifyForbiddenError(error)) {
+    return 'Spotify 앱으로 곡을 여는 과정에서 차단되었습니다. Spotify 앱 설치와 로그인 상태를 확인해주세요.';
+  }
+  return error?.message || fallback;
+}
 
 function getTrackKey(track = {}) {
   if (track.isPending || track.isActionRequired) return '';
@@ -104,6 +116,11 @@ function isPlayableRecommendationSlot(slot = {}) {
     slot.artist &&
     slot.artworkUrl
   );
+}
+
+function canOpenSpotifyTrack(track = {}) {
+  const uri = String(track.spotifyUri || track.uri || '').trim();
+  return uri.startsWith('spotify:track:') || uri.startsWith('spotify:playlist:');
 }
 
 function formatTimeLabel() {
@@ -310,7 +327,7 @@ function MarqueeText({ children, style, containerStyle }) {
 }
 
 export default function HomeScreen({ navigation }) {
-  const { play, currentTrack, playerStatus, prepareAutoPlay, requestAuthorization, getState } = useContext(PlayerContext);
+  const { play, openInSpotify, currentTrack, playerStatus } = useContext(PlayerContext);
   const {
     location,
     placeName,
@@ -460,7 +477,6 @@ export default function HomeScreen({ navigation }) {
     showLoading = false,
     advance = false,
     refreshSeed = null,
-    allowSpotifyPrompt = true,
   } = {}) => {
     if (recommendationRefreshInFlightRef.current) {
       return;
@@ -485,23 +501,6 @@ export default function HomeScreen({ navigation }) {
         ? slots.filter(isPlayableRecommendationSlot)
         : [];
 
-      if (playableSlots.length < 4 && allowSpotifyPrompt) {
-        await requestAuthorization({ forcePrompt: true });
-        await prepareAutoPlay(null).catch(() => {});
-        slots = await getRecommendationSlots({
-          userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
-          location: recommendationLocation,
-          weather,
-          place: placeName ? { name: placeName } : null,
-          force: true,
-          excludeTrackKeys: advance ? getRefreshExcludeKeys() : [],
-          refreshSeed: Date.now(),
-        });
-        playableSlots = Array.isArray(slots)
-          ? slots.filter(isPlayableRecommendationSlot)
-          : [];
-      }
-
       const validSlots = Array.isArray(slots)
         ? slots.filter(Boolean)
         : [];
@@ -518,13 +517,16 @@ export default function HomeScreen({ navigation }) {
           }
         }
       } else {
-        Alert.alert('Spotify 연결 필요', '추천곡과 앨범표지를 가져오려면 Spotify 권한을 다시 확인해주세요.');
+        setRecommendationSlots(validSlots.length > 0 ? validSlots : INITIAL_RECOMMENDATION_SLOTS);
+        if (showLoading) {
+          Alert.alert('추천 준비 중', 'NOWHERE 기록, 좋아하는 아티스트, 한국 Top50에서 앨범 이미지가 있는 곡을 다시 확인하고 있어요.');
+        }
       }
     } catch (error) {
       if (showLoading) {
         Alert.alert(
-          'Spotify 연결 필요',
-          error.message || '추천곡과 앨범표지를 가져오려면 Spotify 권한을 다시 확인해주세요.'
+          '추천 불러오기 실패',
+          getSpotifyActionMessage(error, '추천곡과 앨범표지를 불러오지 못했습니다.')
         );
       }
     } finally {
@@ -538,33 +540,10 @@ export default function HomeScreen({ navigation }) {
     authUser?.uid,
     getRefreshExcludeKeys,
     placeName,
-    prepareAutoPlay,
     recommendationLocation,
     rememberRecommendationSlots,
-    requestAuthorization,
     weather,
   ]);
-
-  const shouldAskToOpenSpotify = useCallback((state = playerStatus) => {
-    const status = state?.playbackStatus || 'idle';
-    if (state?.isPlaying) {
-      return false;
-    }
-    if ([
-      'playing',
-      'paused',
-      'openedSpotify',
-      'loading',
-      'preparingAutoPlay',
-      'appRemoteOpeningSpotify',
-      'appRemoteAwaitingSpotify',
-      'appRemoteAuthorized',
-      'appRemoteConnected',
-    ].includes(status)) {
-      return false;
-    }
-    return true;
-  }, [playerStatus]);
 
   const ensureSpotifyRunningAndRefresh = useCallback(async ({
     enableAutoPlayMode = false,
@@ -576,12 +555,8 @@ export default function HomeScreen({ navigation }) {
 
     spotifyEnsureInFlightRef.current = true;
     try {
-      const state = await getState().catch(() => null);
-
       if (enableAutoPlayMode) {
         await prepareAutoPlayMode();
-      } else if (shouldAskToOpenSpotify(state)) {
-        await prepareAutoPlay(null).catch(() => {});
       }
 
       await clearRecommendationCache();
@@ -590,11 +565,8 @@ export default function HomeScreen({ navigation }) {
       spotifyEnsureInFlightRef.current = false;
     }
   }, [
-    getState,
-    prepareAutoPlay,
     prepareAutoPlayMode,
     refreshRecommendations,
-    shouldAskToOpenSpotify,
   ]);
 
   useEffect(() => {
@@ -625,18 +597,26 @@ export default function HomeScreen({ navigation }) {
   }, [selectedTrack, selectedTrackKey]);
 
   const handlePlay = async () => {
+    if (selectedTrack.isChallenge || selectedTrack.slotType === 'challenge') {
+      setIsChallengeOpen(true);
+      return;
+    }
+
     if (selectedTrack.isPending || selectedTrack.isActionRequired) {
       await refreshRecommendations({
         force: true,
         showLoading: true,
         refreshSeed: Date.now(),
-        allowSpotifyPrompt: true,
       });
       return;
     }
 
-    if (selectedTrack.isChallenge) {
-      setIsChallengeOpen(true);
+    if (!canOpenSpotifyTrack(selectedTrack)) {
+      await refreshRecommendations({
+        force: true,
+        showLoading: true,
+        refreshSeed: Date.now(),
+      });
       return;
     }
 
@@ -648,7 +628,12 @@ export default function HomeScreen({ navigation }) {
       }
     }
 
-    const playableSlots = recommendationSlots.filter((track) => !track.isPending && !track.isChallenge);
+    const playableSlots = recommendationSlots.filter((track) => (
+      !track.isPending &&
+      !track.isActionRequired &&
+      !track.isChallenge &&
+      canOpenSpotifyTrack(track)
+    ));
     const playableIndex = playableSlots.findIndex((track) => track.id === selectedTrack.id);
     const queueStartIndex = playableIndex >= 0 ? playableIndex : 0;
     const orderedQueue = playableSlots
@@ -656,10 +641,6 @@ export default function HomeScreen({ navigation }) {
       .concat(playableSlots.slice(0, queueStartIndex));
 
     try {
-      const state = await getState().catch(() => null);
-      if (shouldAskToOpenSpotify(state)) {
-        await prepareAutoPlay(selectedTrack).catch(() => {});
-      }
       await play(selectedTrack, orderedQueue);
       await recordListeningEvent({
         userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
@@ -669,7 +650,7 @@ export default function HomeScreen({ navigation }) {
         context: recommendationContext,
       }).catch(() => {});
     } catch (error) {
-      Alert.alert('Spotify 재생 실패', error.message || 'Spotify로 곡을 열지 못했습니다.');
+      Alert.alert('Spotify 재생 실패', getSpotifyActionMessage(error, 'Spotify로 곡을 열지 못했습니다.'));
     }
   };
 
@@ -690,7 +671,7 @@ export default function HomeScreen({ navigation }) {
         color: '#B99BFF',
       };
       setIsChallengeOpen(false);
-      await play(nextTrack, [nextTrack]);
+      await openInSpotify(nextTrack, [nextTrack]);
       await recordListeningEvent({
         userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
         track: nextTrack,
@@ -750,7 +731,7 @@ export default function HomeScreen({ navigation }) {
     }
 
     ensureSpotifyRunningAndRefresh({ enableAutoPlayMode: true, showLoading: true }).catch((error) => {
-      Alert.alert('자동재생 설정 실패', error.message || 'Spotify 실행 또는 자동재생 설정에 실패했습니다.');
+      Alert.alert('자동재생 설정 실패', getSpotifyActionMessage(error, 'Spotify 실행 또는 자동재생 설정에 실패했습니다.'));
     });
   };
 
@@ -855,7 +836,7 @@ export default function HomeScreen({ navigation }) {
             <Text style={styles.trackArtist} numberOfLines={1}>{selectedTrack.artist}</Text>
             <Text style={styles.tapHint}>
               {selectedTrack.isActionRequired
-                ? '원을 탭하여 Spotify 연결 확인'
+                ? '원을 탭하여 추천 다시 불러오기'
                 : isLoadingRecommendations
                   ? 'Spotify 추천을 불러오는 중'
                   : '원을 탭하여 듣기'}

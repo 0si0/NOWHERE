@@ -386,6 +386,69 @@ service cloud.firestore {
         isShortString(data.recordedAt, 64);
     }
 
+    function isShallWeShareRecord(data) {
+      return data.keys().hasAll([
+        'userId',
+        'schemaVersion',
+        'dayKey',
+        'message',
+        'selectedTrack',
+        'trackId',
+        'trackName',
+        'artistName',
+        'albumName',
+        'albumArtUrl',
+        'spotifyUri',
+        'latitude',
+        'longitude',
+        'geohash',
+        'geohashPrefix',
+        'createdAtIso',
+        'createdAt'
+      ]) &&
+        data.keys().hasOnly([
+        'userId',
+        'schemaVersion',
+        'dayKey',
+        'message',
+        'selectedTrack',
+        'trackId',
+        'trackName',
+        'artistName',
+        'albumName',
+        'albumArtUrl',
+        'spotifyUri',
+        'latitude',
+        'longitude',
+        'geohash',
+        'geohashPrefix',
+        'createdAtIso',
+        'createdAt'
+      ]) &&
+        signedIn() &&
+        data.userId == request.auth.uid &&
+        data.schemaVersion is int &&
+        isShortString(data.dayKey, 16) &&
+        isShortString(data.message, 80) &&
+        isPlayTargetMap(data.selectedTrack) &&
+        isShortString(data.trackId, 180) &&
+        isShortString(data.trackName, 160) &&
+        isShortString(data.artistName, 160) &&
+        isNullableString(data.albumName, 160) &&
+        isNullableString(data.albumArtUrl, 500) &&
+        isNullableString(data.spotifyUri, 240) &&
+        isNumber(data.latitude) &&
+        isNumber(data.longitude) &&
+        data.latitude >= -90 &&
+        data.latitude <= 90 &&
+        data.longitude >= -180 &&
+        data.longitude <= 180 &&
+        isShortString(data.geohash, 12) &&
+        isShortString(data.geohashPrefix, 8) &&
+        isShortString(data.createdAtIso, 64) &&
+        data.createdAt is timestamp;
+    }
+
     function isConsent(data, userId, consentId) {
       return data.keys().hasAll([
         'userId',
@@ -483,6 +546,14 @@ service cloud.firestore {
     match /musicMapPublicRecords/{recordId} {
       allow read: if signedIn();
       allow create: if signedIn() && isMusicMapPublicRecord(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    match /shallWeShareRecords/{recordId} {
+      allow read: if signedIn();
+      allow create: if signedIn() &&
+        recordId == request.auth.uid + "_" + request.resource.data.dayKey &&
+        isShallWeShareRecord(request.resource.data);
       allow update, delete: if false;
     }
   }

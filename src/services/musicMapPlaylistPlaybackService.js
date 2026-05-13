@@ -2,8 +2,14 @@ const MAX_TRACK_PLAYLIST_ITEMS = 10;
 const MIN_TRACK_DURATION_MS = 30000;
 const DEFAULT_TRACK_DURATION_MS = 180000;
 
-let playbackRunId = 0;
-let playbackTimerId = null;
+const playbackControllers = new Map();
+
+function getController(channel = 'music-map') {
+  const key = String(channel || 'music-map');
+  const controller = playbackControllers.get(key) || { runId: 0, timerId: null };
+  playbackControllers.set(key, controller);
+  return controller;
+}
 
 function getTrackDurationMs(track = {}) {
   const durationMs = Number(track.durationMs || 0);
@@ -18,15 +24,22 @@ function getPlayableTracks(tracks = []) {
     .slice(0, MAX_TRACK_PLAYLIST_ITEMS);
 }
 
-export function stopMusicMapTrackPlaylistPlayback() {
-  playbackRunId += 1;
-  if (playbackTimerId) {
-    clearTimeout(playbackTimerId);
-    playbackTimerId = null;
+export function stopMusicMapTrackPlaylistPlayback(channel = 'music-map') {
+  const controller = getController(channel);
+  controller.runId += 1;
+  if (controller.timerId) {
+    clearTimeout(controller.timerId);
+    controller.timerId = null;
   }
 }
 
-export async function startMusicMapTrackPlaylistPlayback(tracks = [], playTrack, onNextTrackError = () => {}) {
+export async function startMusicMapTrackPlaylistPlayback(
+  tracks = [],
+  playTrack,
+  onNextTrackError = () => {},
+  onComplete = () => {},
+  channel = 'music-map'
+) {
   const playableTracks = getPlayableTracks(tracks);
   if (!playableTracks.length) {
     throw new Error('재생 가능한 Spotify 곡이 없습니다. 트랙 플레이리스트를 다시 설정해주세요.');
@@ -35,27 +48,47 @@ export async function startMusicMapTrackPlaylistPlayback(tracks = [], playTrack,
     throw new Error('Spotify 재생 준비가 끝나지 않았습니다. 잠시 후 다시 시도해주세요.');
   }
 
-  stopMusicMapTrackPlaylistPlayback();
-  const currentRunId = playbackRunId;
+  const controller = getController(channel);
+  stopMusicMapTrackPlaylistPlayback(channel);
+  const currentRunId = controller.runId;
 
-  const playAtIndex = async (index) => {
-    if (playbackRunId !== currentRunId || index >= playableTracks.length) {
-      return;
-    }
+  try {
+    await playTrack(playableTracks[0], playableTracks);
+  } catch (error) {
+    onNextTrackError(error);
+    throw error;
+  }
 
-    const track = playableTracks[index];
-    await playTrack(track, playableTracks.slice(index));
+  if (controller.runId !== currentRunId) {
+    return;
+  }
 
-    if (playbackRunId !== currentRunId || index >= playableTracks.length - 1) {
-      return;
-    }
+  const scheduleNextTrack = (index) => {
+    const currentTrack = playableTracks[index];
+    controller.timerId = setTimeout(() => {
+      if (controller.runId !== currentRunId) {
+        return;
+      }
 
-    playbackTimerId = setTimeout(() => {
-      playAtIndex(index + 1).catch((error) => {
-        onNextTrackError(error);
-      });
-    }, getTrackDurationMs(track));
+      const nextIndex = index + 1;
+      if (nextIndex >= playableTracks.length) {
+        controller.timerId = null;
+        onComplete();
+        return;
+      }
+
+      playTrack(playableTracks[nextIndex], playableTracks.slice(nextIndex))
+        .then(() => {
+          if (controller.runId !== currentRunId) {
+            return;
+          }
+          scheduleNextTrack(nextIndex);
+        })
+        .catch((error) => {
+          onNextTrackError(error);
+        });
+    }, getTrackDurationMs(currentTrack));
   };
 
-  await playAtIndex(0);
+  scheduleNextTrack(0);
 }

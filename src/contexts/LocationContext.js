@@ -31,6 +31,7 @@ import {
   stopMusicMapRecordingSession,
   subscribeMusicMapRecordingSession,
 } from '../services/musicMapRecordingService';
+import { startMusicMapTrackPlaylistPlayback } from '../services/musicMapPlaylistPlaybackService';
 import { getCurrentWeather, isWeatherConfigured } from '../services/weatherService';
 import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
 
@@ -532,41 +533,62 @@ export function LocationProvider({ children }) {
       const playbackTarget = await resolveAutoPlayPlaybackTarget(target);
       const trackToPlay = playbackTarget?.track || target;
       const queueToPlay = playbackTarget?.queue?.length ? playbackTarget.queue : [trackToPlay];
-      if (playerRef.current?.playInBackground) {
-        await playerRef.current.playInBackground(trackToPlay, queueToPlay);
-      } else {
-        await musicPlayerService.playInBackground(trackToPlay, queueToPlay);
-      }
+      const playAndRecordTrack = async (nextTrack, nextQueue = []) => {
+        const nextTrackToPlay = nextTrack || trackToPlay;
+        const nextQueueToPlay = nextQueue?.length ? nextQueue : [nextTrackToPlay];
+        let playbackState;
+        if (playerRef.current?.playInBackground) {
+          playbackState = await playerRef.current.playInBackground(nextTrackToPlay, nextQueueToPlay);
+        } else {
+          playbackState = await musicPlayerService.playInBackground(nextTrackToPlay, nextQueueToPlay);
+        }
+
+        recordListeningEvent({
+          userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
+          track: nextTrackToPlay,
+          source: queueToPlay.length > 1 ? 'autoplay-playlist' : 'autoplay',
+          recommendationSlot: 'place-autoplay',
+          context: buildListeningContext({
+            location: coords || locationRef.current,
+            weather: weatherRef.current,
+            place,
+            savedPlaceId: place.id,
+          }),
+        }).catch(() => {});
+
+        if (isFirebaseConfigured && authUser?.uid && !authUser.isAnonymous) {
+          savePlayRecord({
+            userId: authUser.uid,
+            trackId: nextTrackToPlay.id || nextTrackToPlay.spotifyUri,
+            title: nextTrackToPlay.title,
+            artist: nextTrackToPlay.artist || 'Unknown Artist',
+            albumArtUrl: nextTrackToPlay.artworkUrl,
+            provider: nextTrackToPlay.provider || 'spotify',
+            placeName: place.name,
+            savedPlaceId: place.id,
+            latitude: coords?.latitude ?? place.lat ?? place.coordinates?.latitude,
+            longitude: coords?.longitude ?? place.lon ?? place.coordinates?.longitude,
+          }).catch(() => {});
+        }
+
+        return playbackState;
+      };
+
+      await startMusicMapTrackPlaylistPlayback(
+        queueToPlay,
+        playAndRecordTrack,
+        (nextError) => {
+          setAutoPlayStatus({
+            status: 'error',
+            place,
+            error: nextError?.message || '자동재생 플레이리스트 다음 곡 재생에 실패했습니다.',
+          });
+        },
+        () => {},
+        'autoplay'
+      );
       await markAutoPlayTriggered(place.id);
       setAutoPlayStatus({ status: 'playing', place, error: null });
-
-      recordListeningEvent({
-        userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
-        track: trackToPlay,
-        source: 'autoplay',
-        recommendationSlot: 'place-autoplay',
-        context: buildListeningContext({
-          location: coords || locationRef.current,
-          weather: weatherRef.current,
-          place,
-          savedPlaceId: place.id,
-        }),
-      }).catch(() => {});
-
-      if (isFirebaseConfigured && authUser?.uid && !authUser.isAnonymous) {
-        savePlayRecord({
-          userId: authUser.uid,
-          trackId: trackToPlay.id || trackToPlay.spotifyUri,
-          title: trackToPlay.title,
-          artist: trackToPlay.artist || 'Unknown Artist',
-          albumArtUrl: trackToPlay.artworkUrl,
-          provider: trackToPlay.provider || 'spotify',
-          placeName: place.name,
-          savedPlaceId: place.id,
-          latitude: coords?.latitude ?? place.lat ?? place.coordinates?.latitude,
-          longitude: coords?.longitude ?? place.lon ?? place.coordinates?.longitude,
-        }).catch(() => {});
-      }
 
       return place;
     } catch (error) {
@@ -905,7 +927,7 @@ export function LocationProvider({ children }) {
     return true;
   }, [stopGeofenceRegions]);
 
-  const startMusicMapRecording = useCallback(async ({ trackPlaylist = [] } = {}) => {
+  const startMusicMapRecording = useCallback(async ({ trackPlaylist = [], playlist = null } = {}) => {
     const actionToken = musicMapActionTokenRef.current + 1;
     musicMapActionTokenRef.current = actionToken;
     musicMapStopRequestedRef.current = false;
@@ -926,6 +948,7 @@ export function LocationProvider({ children }) {
       initialTrack: playlistTracks[0] || null,
       initialPlaybackState: null,
       trackPlaylist: playlistTracks,
+      playlist,
     });
 
     if (musicMapStopRequestedRef.current || musicMapActionTokenRef.current !== actionToken) {

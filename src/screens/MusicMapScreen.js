@@ -23,8 +23,10 @@ import {
   getOrCreateAppUserId,
 } from '../services/firebaseService';
 import {
+  createOwnerMusicMapSpotifyPlaylist,
   getTrendingMusicMapTracks,
   hydrateMusicMapTrackColors,
+  importSpotifyPlaylistTracks,
   loadMusicMapTrackPlaylists,
   loadSelectedMusicMapTrackPlaylistId,
   MAX_TRACK_PLAYLIST_ITEMS,
@@ -32,10 +34,7 @@ import {
   saveSelectedMusicMapTrackPlaylistId,
   searchMusicMapTracks,
 } from '../services/musicMapPlaylistService';
-import {
-  startMusicMapTrackPlaylistPlayback,
-  stopMusicMapTrackPlaylistPlayback,
-} from '../services/musicMapPlaylistPlaybackService';
+import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
 
 const UI = {
   bg: '#05070A',
@@ -56,6 +55,13 @@ function getSpotifyPlaybackMessage(error, fallback = 'Spotify 재생 요청에 �
     return 'Spotify에서 현재 재생 요청을 허용하지 않았습니다. 앱은 계속 사용할 수 있으며 잠시 후 다시 시도해주세요.';
   }
   return error?.message || fallback;
+}
+
+function buildPlaylistTrackSignature(tracks = []) {
+  return (Array.isArray(tracks) ? tracks : [])
+    .map((track) => String(track?.spotifyUri || track?.uri || track?.id || '').trim())
+    .filter(Boolean)
+    .join('|');
 }
 
 const PERIOD_FILTERS = [
@@ -677,8 +683,10 @@ export default function MusicMapScreen({ navigation }) {
   const [selectedPlaylistId, setSelectedPlaylistId] = useState('');
   const [trackQuery, setTrackQuery] = useState('');
   const [trackResults, setTrackResults] = useState([]);
+  const [spotifyPlaylistUrl, setSpotifyPlaylistUrl] = useState('');
   const [trendingTracks, setTrendingTracks] = useState([]);
   const [isSearchingTracks, setIsSearchingTracks] = useState(false);
+  const [isImportingSpotifyPlaylist, setIsImportingSpotifyPlaylist] = useState(false);
   const [isLoadingTrendingTracks, setIsLoadingTrendingTracks] = useState(false);
   const loadRecordsInFlightRef = useRef(null);
   const startActionInFlightRef = useRef(false);
@@ -693,6 +701,8 @@ export default function MusicMapScreen({ navigation }) {
   const currentTrack = player?.currentTrack;
   const playerState = player?.playerState || {};
   const location = locationContext?.location || locationContext?.lastKnownLocation;
+  const weather = locationContext?.weather;
+  const currentPlaceName = locationContext?.placeName || '';
   const musicMapRecording = locationContext?.musicMapRecording || {};
   const isRecording = Boolean(musicMapRecording.isActive);
   const effectiveIsRecording = isRecording || recordingUiPhase === 'starting' || recordingUiPhase === 'recording';
@@ -751,15 +761,12 @@ export default function MusicMapScreen({ navigation }) {
     ])
       .then(([playlists, selectedId]) => {
         if (!isMounted) return;
-        const nextPlaylists = playlists.length ? playlists : [createEmptyTrackPlaylist(0)];
+        const nextPlaylists = playlists;
         setSavedPlaylists(nextPlaylists);
         const nextSelectedId = nextPlaylists.some((playlist) => playlist.id === selectedId)
           ? selectedId
           : nextPlaylists[0]?.id || '';
         setSelectedPlaylistId(nextSelectedId);
-        if (!playlists.length) {
-          saveMusicMapTrackPlaylists(nextPlaylists).catch(() => null);
-        }
         if (nextSelectedId) {
           saveSelectedMusicMapTrackPlaylistId(nextSelectedId).catch(() => null);
         }
@@ -930,9 +937,50 @@ export default function MusicMapScreen({ navigation }) {
     }
   }, [trackQuery]);
 
+  const handleImportSpotifyPlaylist = useCallback(async () => {
+    const input = spotifyPlaylistUrl.trim();
+    if (!input) {
+      Alert.alert('링크 필요', 'Spotify 플레이리스트 링크를 붙여넣어주세요.');
+      return;
+    }
+    if (effectiveIsRecording) {
+      Alert.alert('기록 중 가져오기 불가', '기록 중에는 플레이리스트를 수정할 수 없습니다.');
+      return;
+    }
+
+    setIsImportingSpotifyPlaylist(true);
+    try {
+      const imported = await importSpotifyPlaylistTracks(input, MAX_TRACK_PLAYLIST_ITEMS);
+      const now = new Date().toISOString();
+      const nextPlaylist = {
+        id: `${imported.id}-${Date.now()}`,
+        name: imported.name || `Spotify 플레이리스트 ${savedPlaylists.length + 1}`,
+        spotifyUri: imported.spotifyUri,
+        sourceType: 'spotify-playlist',
+        tracks: await hydrateMusicMapTrackColors(imported.tracks),
+        createdAt: now,
+        updatedAt: now,
+      };
+      await persistPlaylists([nextPlaylist, ...savedPlaylists], nextPlaylist.id);
+      setSpotifyPlaylistUrl('');
+      Alert.alert(
+        '가져오기 완료',
+        '이 플레이리스트는 Spotify context로 실행되어 화면이 꺼져도 Spotify 앱이 다음 곡을 이어갈 수 있습니다.'
+      );
+    } catch (nextError) {
+      Alert.alert('가져오기 실패', nextError.message || 'Spotify 플레이리스트를 가져오지 못했습니다.');
+    } finally {
+      setIsImportingSpotifyPlaylist(false);
+    }
+  }, [effectiveIsRecording, persistPlaylists, savedPlaylists, spotifyPlaylistUrl]);
+
   const handleAddPlaylistTrack = useCallback(async (track) => {
     if (effectiveIsRecording) {
       Alert.alert('기록 중 수정 불가', '기록 중에는 트랙 플레이리스트를 수정할 수 없습니다.');
+      return;
+    }
+    if (!selectedPlaylist?.id) {
+      Alert.alert('플레이리스트를 먼저 만들어주세요', '새로 만들기를 누른 뒤 이름을 정하고 곡을 추가해주세요.');
       return;
     }
     if (trackPlaylist.length >= MAX_TRACK_PLAYLIST_ITEMS) {
@@ -944,7 +992,7 @@ export default function MusicMapScreen({ navigation }) {
       return;
     }
     await persistTrackPlaylist([...trackPlaylist, track]);
-  }, [effectiveIsRecording, persistTrackPlaylist, trackPlaylist]);
+  }, [effectiveIsRecording, persistTrackPlaylist, selectedPlaylist?.id, trackPlaylist]);
 
   const handleRemovePlaylistTrack = useCallback(async (index) => {
     if (effectiveIsRecording) return;
@@ -998,15 +1046,44 @@ export default function MusicMapScreen({ navigation }) {
     saveMusicMapTrackPlaylists(nextPlaylists).catch(() => null);
   }, [effectiveIsRecording, savedPlaylists, selectedPlaylist?.id]);
 
-  const handleToggleRecording = useCallback(async () => {
-    setError('');
+  const prepareOwnerSpotifyPlaylist = useCallback(async () => {
+    if (!selectedPlaylist?.id) {
+      throw new Error('기록에 사용할 플레이리스트를 먼저 선택해주세요.');
+    }
 
-    if (effectiveIsRecording) {
+    const currentTracks = selectedPlaylist.tracks || [];
+    const currentSignature = buildPlaylistTrackSignature(currentTracks);
+    const hasReusableOwnerPlaylist = Boolean(
+      selectedPlaylist.spotifyUri &&
+      selectedPlaylist.spotifyPlaylistUrl &&
+      selectedPlaylist.ownerPlaylistTrackSignature === currentSignature
+    );
+
+    if (hasReusableOwnerPlaylist) {
+      return selectedPlaylist;
+    }
+
+    const ownerPlaylist = await createOwnerMusicMapSpotifyPlaylist(selectedPlaylist);
+    const now = new Date().toISOString();
+    const nextPlaylist = {
+      ...selectedPlaylist,
+      ...ownerPlaylist,
+      sourceType: 'owner-spotify-playlist',
+      tracks: ownerPlaylist.tracks?.length ? ownerPlaylist.tracks : currentTracks,
+      updatedAt: now,
+    };
+    const nextPlaylists = savedPlaylists.map((playlist) => (
+      playlist.id === selectedPlaylist.id ? nextPlaylist : playlist
+    ));
+    await persistPlaylists(nextPlaylists, selectedPlaylist.id);
+    return nextPlaylist;
+  }, [persistPlaylists, savedPlaylists, selectedPlaylist]);
+
+  const finalizeRecording = useCallback(async () => {
       if (stopActionInFlightRef.current) {
         return;
       }
       stopActionInFlightRef.current = true;
-      stopMusicMapTrackPlaylistPlayback();
       recordingStartedAtRef.current = null;
       setRecordingElapsedMs(0);
       setRecordingUiPhase('idle');
@@ -1027,6 +1104,13 @@ export default function MusicMapScreen({ navigation }) {
         stopActionInFlightRef.current = false;
         setIsRecordingBusy(false);
       }
+  }, [loadRecords, stopMusicMapRecording]);
+
+  const handleToggleRecording = useCallback(async () => {
+    setError('');
+
+    if (effectiveIsRecording) {
+      await finalizeRecording();
       return;
     }
 
@@ -1066,21 +1150,41 @@ export default function MusicMapScreen({ navigation }) {
         return;
       }
 
+      const preparedPlaylist = await prepareOwnerSpotifyPlaylist();
+      const preparedTracks = preparedPlaylist.tracks || [];
+      const firstTrack = preparedTracks[0];
+      if (!firstTrack?.spotifyUri) {
+        throw new Error('Spotify에서 실행할 수 있는 첫 곡이 없습니다. 플레이리스트 곡을 다시 확인해주세요.');
+      }
+
       recordingStartedAtRef.current = Date.now();
       setRecordingElapsedMs(0);
       setRecordingUiPhase('recording');
-      await startMusicMapRecording?.({ trackPlaylist });
+      await startMusicMapRecording?.({
+        trackPlaylist: preparedTracks,
+        playlist: preparedPlaylist,
+      });
       didStartRecording = true;
-      await startMusicMapTrackPlaylistPlayback(
-        trackPlaylist,
-        typeof player?.play === 'function' ? (track, queue) => player.play(track, queue) : null,
-        (nextError) => {
-          const message = getSpotifyPlaybackMessage(nextError, '트랙 플레이리스트 다음 곡 재생에 실패했습니다.');
-          console.warn('[NOWHERE MusicMap] sequential playlist playback failed', message);
-        }
-      );
+      const recordingContext = buildListeningContext({
+        location: startLocation || location,
+        weather,
+        place: currentPlaceName ? { name: currentPlaceName } : null,
+      });
+      const openSpotify = typeof player?.openInSpotify === 'function'
+        ? player.openInSpotify
+        : player?.play;
+      if (typeof openSpotify !== 'function') {
+        throw new Error('Spotify 실행 준비가 끝나지 않았습니다. 잠시 후 다시 시도해주세요.');
+      }
+      await openSpotify(firstTrack, preparedTracks);
+      recordListeningEvent({
+        userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
+        track: firstTrack,
+        source: 'music-map',
+        recommendationSlot: 'music-map-owner-playlist',
+        context: recordingContext,
+      }).catch(() => {});
     } catch (nextError) {
-      stopMusicMapTrackPlaylistPlayback();
       if (didStartRecording) {
         await stopMusicMapRecording?.().catch(() => null);
       }
@@ -1099,23 +1203,42 @@ export default function MusicMapScreen({ navigation }) {
     }
   }, [
     effectiveIsRecording,
+    authUser?.isAnonymous,
+    authUser?.uid,
+    currentPlaceName,
+    finalizeRecording,
     loadRecords,
+    location,
     locationContext?.hasBackgroundPermission,
     locationContext?.hasForegroundPermission,
     player,
+    prepareOwnerSpotifyPlaylist,
     requestLocationPermissions,
     refreshLocation,
     startMusicMapRecording,
     stopMusicMapRecording,
     trackPlaylist,
+    weather,
   ]);
 
   const handlePlayRecord = useCallback(async (record) => {
     if (!record?.track) return;
-    await player?.play?.(record.track, [record.track]).catch((nextError) => {
+    await player?.play?.(record.track, [record.track]).then(() => {
+      recordListeningEvent({
+        userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
+        track: record.track,
+        source: 'music-map-history',
+        recommendationSlot: 'music-map-history',
+        context: buildListeningContext({
+          location,
+          weather,
+          place: currentPlaceName ? { name: currentPlaceName } : null,
+        }),
+      }).catch(() => {});
+    }).catch((nextError) => {
       setError(getSpotifyPlaybackMessage(nextError));
     });
-  }, [player]);
+  }, [authUser?.isAnonymous, authUser?.uid, currentPlaceName, location, player, weather]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -1135,7 +1258,7 @@ export default function MusicMapScreen({ navigation }) {
               <Text style={styles.title}>뮤직지도</Text>
               <View style={styles.rulePill}>
                 <Ionicons name="information-circle-outline" size={16} color={UI.peach} />
-                <Text style={styles.ruleText}>기록하기를 켠 동안만 이동 경로를 저장</Text>
+                <Text style={styles.ruleText}>기록 중에는 노래를 일시정지 or 다음곡으로 넘기지마세요</Text>
               </View>
             </View>
             <TouchableOpacity style={styles.closeButton} onPress={() => navigation.goBack()}>
@@ -1200,7 +1323,7 @@ export default function MusicMapScreen({ navigation }) {
               <View style={styles.playlistSelectTitleWrap}>
                 <Text style={styles.playlistLabel}>TRACK PLAYLIST</Text>
                 <Text style={styles.playlistSelectTitle} numberOfLines={1}>
-                  {selectedPlaylist?.name || '플레이리스트 없음'}
+                  {selectedPlaylist?.name || '플레이리스트를 만들어주세요'}
                 </Text>
                 <Text style={styles.playlistSelectMeta}>
                   {trackPlaylist.length ? `${trackPlaylist.length}곡 선택됨` : '플레이리스트 탭에서 곡을 추가해주세요'}
@@ -1392,6 +1515,9 @@ export default function MusicMapScreen({ navigation }) {
               <Text style={styles.playlistHelp}>
                 만든 플레이리스트는 자동 저장됩니다. 지도 보기에서 하나를 선택해 기록에 사용할 수 있습니다.
               </Text>
+              <Text style={styles.playlistImportHelp}>
+                화면이 꺼진 상태에서 다음 곡까지 이어가려면 Spotify 플레이리스트 링크를 가져와 사용하세요.
+              </Text>
 
               <View style={styles.playlistLibraryHeader}>
                 <Text style={styles.playlistLibraryTitle}>내 플레이리스트</Text>
@@ -1425,30 +1551,63 @@ export default function MusicMapScreen({ navigation }) {
                 })}
               </ScrollView>
 
-              <View style={styles.playlistEditingHeader}>
-                <View style={styles.playlistEditingTitleWrap}>
-                  <TextInput
-                    value={selectedPlaylist?.name || ''}
-                    onChangeText={handleRenamePlaylist}
-                    placeholder={`${DEFAULT_PLAYLIST_NAME} 1`}
-                    placeholderTextColor={UI.textMuted}
-                    style={styles.playlistNameInput}
-                    editable={!effectiveIsRecording}
-                    maxLength={32}
-                    returnKeyType="done"
-                  />
-                  <Text style={styles.playlistEditingMeta}>변경사항 자동저장</Text>
+              {selectedPlaylist ? (
+                <View style={styles.playlistEditingHeader}>
+                  <View style={styles.playlistEditingTitleWrap}>
+                    <Text style={styles.playlistNameLabel}>플레이리스트 이름</Text>
+                    <TextInput
+                      value={selectedPlaylist.name || ''}
+                      onChangeText={handleRenamePlaylist}
+                      placeholder="플레이리스트 이름을 입력하세요"
+                      placeholderTextColor={UI.textMuted}
+                      style={styles.playlistNameInput}
+                      editable={!effectiveIsRecording}
+                      maxLength={32}
+                      returnKeyType="done"
+                    />
+                    <Text style={styles.playlistEditingMeta}>이름과 곡 순서는 입력 즉시 자동 저장됩니다.</Text>
+                  </View>
+                  {savedPlaylists.length > 1 ? (
+                    <TouchableOpacity
+                      style={styles.playlistDeleteButton}
+                      onPress={() => handleDeletePlaylist(selectedPlaylist?.id)}
+                      disabled={effectiveIsRecording || !selectedPlaylist?.id}
+                      activeOpacity={0.86}
+                    >
+                      <Ionicons name="trash-outline" size={15} color={UI.peach} />
+                    </TouchableOpacity>
+                  ) : null}
                 </View>
-                {savedPlaylists.length > 1 ? (
-                  <TouchableOpacity
-                    style={styles.playlistDeleteButton}
-                    onPress={() => handleDeletePlaylist(selectedPlaylist?.id)}
-                    disabled={effectiveIsRecording || !selectedPlaylist?.id}
-                    activeOpacity={0.86}
-                  >
-                    <Ionicons name="trash-outline" size={15} color={UI.peach} />
-                  </TouchableOpacity>
-                ) : null}
+              ) : (
+                <View style={styles.playlistCreateNotice}>
+                  <Text style={styles.playlistCreateNoticeTitle}>아직 만든 플레이리스트가 없습니다</Text>
+                  <Text style={styles.playlistCreateNoticeText}>새로 만들기를 누른 뒤 이름을 정하고 곡을 추가해주세요.</Text>
+                </View>
+              )}
+
+              <View style={styles.searchRow}>
+                <TextInput
+                  value={spotifyPlaylistUrl}
+                  onChangeText={setSpotifyPlaylistUrl}
+                  placeholder="Spotify 플레이리스트 링크 붙여넣기"
+                  placeholderTextColor={UI.textMuted}
+                  style={styles.searchInput}
+                  editable={!effectiveIsRecording && !isImportingSpotifyPlaylist}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="done"
+                  onSubmitEditing={handleImportSpotifyPlaylist}
+                />
+                <TouchableOpacity
+                  style={[
+                    styles.searchButton,
+                    (isImportingSpotifyPlaylist || effectiveIsRecording) && styles.searchButtonDisabled,
+                  ]}
+                  onPress={handleImportSpotifyPlaylist}
+                  disabled={isImportingSpotifyPlaylist || effectiveIsRecording}
+                >
+                  <Text style={styles.searchButtonText}>{isImportingSpotifyPlaylist ? '가져오는중' : '가져오기'}</Text>
+                </TouchableOpacity>
               </View>
 
               <View style={styles.searchRow}>
@@ -2175,6 +2334,13 @@ const styles = StyleSheet.create({
     lineHeight: 16,
     marginTop: 8,
   },
+  playlistImportHelp: {
+    color: UI.peach,
+    fontSize: 11,
+    fontWeight: '800',
+    lineHeight: 16,
+    marginTop: 8,
+  },
   playlistLibraryHeader: {
     marginTop: 12,
     flexDirection: 'row',
@@ -2206,9 +2372,10 @@ const styles = StyleSheet.create({
   },
   playlistEditingHeader: {
     marginTop: 12,
-    minHeight: 42,
+    minHeight: 72,
     borderRadius: 16,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
@@ -2225,11 +2392,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '900',
   },
+  playlistNameLabel: {
+    color: UI.peach,
+    fontSize: 11,
+    fontWeight: '900',
+    marginBottom: 6,
+  },
   playlistNameInput: {
-    minHeight: 24,
-    padding: 0,
+    minHeight: 38,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: UI.border,
+    backgroundColor: 'rgba(255, 241, 236, 0.04)',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
     color: UI.text,
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: '900',
   },
   playlistEditingMeta: {
@@ -2237,6 +2415,25 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
     marginTop: 3,
+  },
+  playlistCreateNotice: {
+    marginTop: 12,
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.16)',
+    backgroundColor: 'rgba(255, 201, 184, 0.06)',
+  },
+  playlistCreateNoticeTitle: {
+    color: UI.text,
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  playlistCreateNoticeText: {
+    color: UI.textMuted,
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 5,
   },
   playlistDeleteButton: {
     width: 30,

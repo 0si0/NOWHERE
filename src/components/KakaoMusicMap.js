@@ -189,12 +189,25 @@ function getPointSignature(point) {
   return `${point.latitude.toFixed(5)},${point.longitude.toFixed(5)}`;
 }
 
-function getRecordsSignature(records = [], mode, selectedRecordId, shouldFit) {
+function getRecordsSignature(
+  records = [],
+  mode,
+  selectedRecordId,
+  shouldFit,
+  center,
+  fixedCenter,
+  shouldFocusSelectedRecord,
+  disableGestures
+) {
   const safeRecords = records.slice(0, MAX_MAP_RECORDS);
   return JSON.stringify({
     mode,
     selectedRecordId,
     shouldFit,
+    fixedCenter: Boolean(fixedCenter),
+    shouldFocusSelectedRecord: shouldFocusSelectedRecord !== false,
+    disableGestures: Boolean(disableGestures),
+    center: fixedCenter ? getPointSignature(center) : '',
     records: safeRecords.map((record) => {
       const routePoints = Array.isArray(record.routePoints) ? record.routePoints : [];
       const lastPoint = routePoints[routePoints.length - 1] || record.currentLocation || record.location;
@@ -239,6 +252,11 @@ function KakaoMusicMap({
   mode,
   selectedRecordId,
   onRecordPress,
+  height = 520,
+  shouldFitRecords = true,
+  fixedCenter = false,
+  disableGestures = false,
+  shouldFocusSelectedRecord = true,
 }) {
   const webviewRef = useRef(null);
   const readyTimerRef = useRef(null);
@@ -281,7 +299,16 @@ function KakaoMusicMap({
     }
 
     const hasLiveRecord = records?.some((record) => record.isLive);
-    const signature = getRecordsSignature(records, mode, selectedRecordId, shouldFit);
+    const signature = getRecordsSignature(
+      records,
+      mode,
+      selectedRecordId,
+      shouldFit,
+      center,
+      fixedCenter,
+      shouldFocusSelectedRecord,
+      disableGestures
+    );
     if (signature === lastInjectSignatureRef.current) {
       return;
     }
@@ -291,6 +318,10 @@ function KakaoMusicMap({
       mode,
       selectedRecordId,
       shouldFit,
+      center: normalizePoint(center),
+      fixedCenter: Boolean(fixedCenter),
+      disableGestures: Boolean(disableGestures),
+      shouldFocusSelectedRecord: shouldFocusSelectedRecord !== false,
     };
 
     if (!hasLiveRecord) {
@@ -328,7 +359,17 @@ function KakaoMusicMap({
         performInject(pending.payload);
       }, LIVE_MAP_INJECT_THROTTLE_MS - elapsed);
     }
-  }, [isMapReady, mode, performInject, records, selectedRecordId]);
+  }, [
+    center,
+    disableGestures,
+    fixedCenter,
+    isMapReady,
+    mode,
+    performInject,
+    records,
+    selectedRecordId,
+    shouldFocusSelectedRecord,
+  ]);
 
   const handleMessage = useCallback((event) => {
     try {
@@ -373,18 +414,18 @@ function KakaoMusicMap({
 
   useEffect(() => {
     const hasLiveRecord = records?.some((record) => record.isLive);
-    const shouldFit = hasLiveRecord ? !hasFittedLiveRecordRef.current : true;
+    const shouldFit = shouldFitRecords && (hasLiveRecord ? !hasFittedLiveRecordRef.current : true);
     injectRecords(shouldFit);
-    if (hasLiveRecord) {
+    if (shouldFitRecords && hasLiveRecord) {
       hasFittedLiveRecordRef.current = true;
     } else {
       hasFittedLiveRecordRef.current = false;
     }
-  }, [injectRecords, records]);
+  }, [injectRecords, records, shouldFitRecords]);
 
   if (!canRenderMap) {
     return (
-      <View style={styles.fallback}>
+      <View style={[styles.fallback, { height }]}>
         <Text style={styles.fallbackTitle}>Kakao Maps API 키가 필요합니다</Text>
         <Text style={styles.fallbackText}>
           뮤직지도를 실제 지도 위에 표시하려면 EXPO_PUBLIC_KAKAO_MAPS_API_KEY 설정이 필요합니다.
@@ -395,7 +436,7 @@ function KakaoMusicMap({
 
   if (!mapUrl) {
     return (
-      <View style={styles.fallback}>
+      <View style={[styles.fallback, { height }]}>
         <Text style={styles.fallbackTitle}>지도 Hosting URL이 필요합니다</Text>
         <Text style={styles.fallbackText}>
           EXPO_PUBLIC_KAKAO_MAPS_BASE_URL에 music-map.html이 배포된 Firebase Hosting 주소를 설정해주세요.
@@ -405,7 +446,7 @@ function KakaoMusicMap({
   }
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { height }]}>
       <WebView
         ref={webviewRef}
         originWhitelist={['https://*']}

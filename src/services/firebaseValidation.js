@@ -149,6 +149,8 @@ function cleanRouteSegments(routeSegments = []) {
         albumColor,
         startIndex,
         endIndex,
+        startElapsedMs: cleanPositiveInteger(segment.startElapsedMs),
+        endElapsedMs: cleanPositiveInteger(segment.endElapsedMs),
         startedAt: cleanOptionalTextLoose(segment.startedAt, 64),
         endedAt: cleanOptionalTextLoose(segment.endedAt, 64),
       };
@@ -339,6 +341,10 @@ export function sanitizeMusicMapRecordInput(input) {
     recordType: input.recordType === 'track' ? 'track' : 'pin',
     source: cleanOptionalText(input.source, '기록 소스', 40) || 'spotify-playback',
     sessionId: cleanOptionalText(input.sessionId, '세션 ID', 80),
+    playlistId: cleanOptionalText(input.playlistId, '플레이리스트 ID', 120),
+    spotifyPlaylistId: cleanOptionalText(input.spotifyPlaylistId, 'Spotify 플레이리스트 ID', 120),
+    spotifyPlaylistUrl: cleanOptionalText(input.spotifyPlaylistUrl, 'Spotify 플레이리스트 URL', 500),
+    recordingMode: cleanOptionalText(input.recordingMode, '기록 모드', 40),
     track,
     albumColor: cleanColor(input.albumColor || track.color),
     albumArtUrl: cleanOptionalText(input.albumArtUrl || track.artworkUrl, '앨범 이미지 URL', 500),
@@ -400,6 +406,38 @@ export function sanitizeMusicMapPublicRecordInput(input) {
     playedDurationMs: cleanPositiveInteger(input.playedDurationMs),
     startedAt,
     recordedAt,
+  };
+}
+
+export function sanitizeShallWeShareInput(input) {
+  const latitude = cleanDisplayLatitude(input.latitude);
+  const longitude = cleanDisplayLongitude(input.longitude);
+  const track = cleanPlayTarget(input.track || input.selectedTrack || input.playTarget || input);
+  invariant(track, '함께 남길 노래를 선택해주세요.');
+
+  const createdAtIso = typeof input.createdAtIso === 'string' && input.createdAtIso
+    ? input.createdAtIso
+    : new Date().toISOString();
+  const dayKey = cleanText(input.dayKey, '작성 날짜', { max: 16 });
+  const geohash = encodeGeohash(latitude, longitude);
+
+  return {
+    userId: cleanText(input.userId, '사용자 ID', { max: 128 }),
+    schemaVersion: 1,
+    dayKey,
+    message: cleanText(input.message, '남길 한마디', { max: 80 }),
+    selectedTrack: track,
+    trackId: cleanOptionalText(input.trackId || track.id || track.spotifyUri, '트랙 ID', 180),
+    trackName: cleanText(input.trackName || track.title, '곡 제목', { max: 160 }),
+    artistName: cleanText(input.artistName || track.artist, '아티스트명', { max: 160 }),
+    albumName: cleanOptionalText(input.albumName || track.album, '앨범명', 160),
+    albumArtUrl: cleanOptionalText(input.albumArtUrl || track.artworkUrl, '앨범 이미지 URL', 500),
+    spotifyUri: cleanOptionalText(input.spotifyUri || track.spotifyUri, 'Spotify URI', 240),
+    latitude,
+    longitude,
+    geohash,
+    geohashPrefix: geohash.slice(0, 5),
+    createdAtIso,
   };
 }
 

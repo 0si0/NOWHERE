@@ -47,6 +47,9 @@ function normalizeTrack(track = {}) {
     provider: track.provider || getProvider(),
     spotifyUri: track.spotifyUri || (typeof track.uri === 'string' && track.uri.startsWith('spotify:') ? track.uri : ''),
     uri: track.uri || '',
+    spotifyContextUri: track.spotifyContextUri || track.contextUri || '',
+    spotifyPlaylistUrl: track.spotifyPlaylistUrl || '',
+    spotifyStartUrl: track.spotifyStartUrl || '',
     trackCount: track.trackCount || 0,
     ownerName: track.ownerName || '',
   };
@@ -149,6 +152,24 @@ function getSpotifyOpenUri(track = {}) {
   return uri.startsWith('spotify:') ? uri : '';
 }
 
+function getSpotifyTrackIdFromUri(uri = '') {
+  const value = String(uri || '').trim();
+  if (value.startsWith('spotify:track:')) {
+    return value.split(':')[2] || '';
+  }
+  const match = value.match(/open\.spotify\.com\/track\/([^?/#]+)/i);
+  return match?.[1] || '';
+}
+
+function getSpotifyContextOpenUrl(track = {}) {
+  const contextUri = String(track.spotifyContextUri || track.contextUri || '').trim();
+  const trackId = getSpotifyTrackIdFromUri(track.spotifyUri || track.uri || track.spotifyUrl || '');
+  if (!trackId || !contextUri.startsWith('spotify:playlist:')) {
+    return '';
+  }
+  return `https://open.spotify.com/track/${encodeURIComponent(trackId)}?context=${encodeURIComponent(contextUri)}`;
+}
+
 function getSpotifyWebUrlFromUri(uri = '') {
   const parts = String(uri || '').split(':');
   if (parts.length < 3 || parts[0] !== 'spotify') {
@@ -171,7 +192,7 @@ function isSpotifyControlBlockedError(error) {
 }
 
 async function openSpotifyUriFallback(track, queue = []) {
-  const uri = getSpotifyOpenUri(track);
+  const uri = track.spotifyStartUrl || getSpotifyContextOpenUrl(track) || getSpotifyOpenUri(track) || track.spotifyPlaylistUrl;
   if (!uri) {
     throw buildReconnectionRequiredError();
   }
@@ -388,6 +409,11 @@ export const musicPlayerService = {
 
   async play(track, queue = []) {
     const requestedQueue = normalizeQueue(queue.length ? queue : [track]);
+    const normalizedTrack = normalizeTrack(track);
+
+    if (normalizedTrack.spotifyContextUri) {
+      return openSpotifyUriFallback(normalizedTrack, requestedQueue);
+    }
 
     if (!isNativeNowherePlayerAvailable) {
       if (getSpotifyOpenUri(track)) {
@@ -404,7 +430,7 @@ export const musicPlayerService = {
     }
 
     try {
-      const playableTrack = await maybeResolvePlayableTrack(track);
+      const playableTrack = await maybeResolvePlayableTrack(normalizedTrack);
       const playableQueue = await Promise.all(
         requestedQueue.map((queuedTrack) => maybeResolvePlayableTrack(queuedTrack))
       );
@@ -425,6 +451,11 @@ export const musicPlayerService = {
 
   async playInBackground(track, queue = []) {
     const requestedQueue = normalizeQueue(queue.length ? queue : [track]);
+    const normalizedTrack = normalizeTrack(track);
+
+    if (normalizedTrack.spotifyContextUri) {
+      return openSpotifyUriFallback(normalizedTrack, requestedQueue);
+    }
 
     if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.playInBackgroundAsync) {
       if (getSpotifyOpenUri(track)) {
@@ -441,7 +472,7 @@ export const musicPlayerService = {
     }
 
     try {
-      const playableTrack = await maybeResolvePlayableTrack(track);
+      const playableTrack = await maybeResolvePlayableTrack(normalizedTrack);
       const playableQueue = await Promise.all(
         requestedQueue.map((queuedTrack) => maybeResolvePlayableTrack(queuedTrack))
       );

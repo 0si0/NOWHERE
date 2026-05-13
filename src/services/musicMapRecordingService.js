@@ -121,7 +121,7 @@ function getPlaylistTrackAtElapsed(session = {}, elapsedMs = getElapsedMs(sessio
   for (let index = 0; index < trackPlaylist.length; index += 1) {
     const track = trackPlaylist[index];
     const durationMs = Math.max(MIN_TRACK_DURATION_MS, Number(track.durationMs || 0) || DEFAULT_TRACK_DURATION_MS);
-    if (elapsedMs < cursorMs + durationMs || index === trackPlaylist.length - 1) {
+    if (elapsedMs < cursorMs + durationMs) {
       return {
         track,
         index,
@@ -132,12 +132,18 @@ function getPlaylistTrackAtElapsed(session = {}, elapsedMs = getElapsedMs(sessio
     cursorMs += durationMs;
   }
 
-  return {
-    track: trackPlaylist[trackPlaylist.length - 1],
-    index: trackPlaylist.length - 1,
-    startedAtMs: cursorMs,
-    endedAtMs: cursorMs + DEFAULT_TRACK_DURATION_MS,
-  };
+  return null;
+}
+
+function getPlaylistTotalDurationMs(tracks = []) {
+  return normalizeTrackPlaylist(tracks).reduce((total, track) => (
+    total + Math.max(MIN_TRACK_DURATION_MS, Number(track.durationMs || 0) || DEFAULT_TRACK_DURATION_MS)
+  ), 0);
+}
+
+function isPlaylistComplete(session = {}, nowMs = Date.now()) {
+  const totalDurationMs = getPlaylistTotalDurationMs(session.trackPlaylist);
+  return totalDurationMs > 0 && getElapsedMs(session, nowMs) >= totalDurationMs;
 }
 
 function getAlbumColor(track = {}) {
@@ -380,6 +386,8 @@ function buildRouteSegment(segment = {}, endIndex = 0) {
     ...getTrackSummary(segment.track || segment, segment.albumColor),
     startIndex,
     endIndex: Math.max(startIndex, Number.isInteger(endIndex) ? endIndex : startIndex),
+    startElapsedMs: Number.isFinite(segment.startElapsedMs) ? Math.max(0, Math.round(segment.startElapsedMs)) : 0,
+    endElapsedMs: Number.isFinite(segment.endElapsedMs) ? Math.max(0, Math.round(segment.endElapsedMs)) : 0,
     startedAt: segment.startedAt,
     endedAt: segment.endedAt || segment.lastUpdatedAt || '',
   };
@@ -397,7 +405,7 @@ function upsertRouteSegment(session, segment) {
   return routeSegments.map((item, index) => (index === existingIndex ? nextSegment : item)).slice(-120);
 }
 
-function buildSegment(track, point, recordedAt, placeName, startIndex = 0) {
+function buildSegment(track, point, recordedAt, placeName, startIndex = 0, startElapsedMs = 0) {
   const albumColor = getAlbumColor(track);
   return {
     id: buildRecordId('segment', track, recordedAt),
@@ -409,6 +417,8 @@ function buildSegment(track, point, recordedAt, placeName, startIndex = 0) {
     placeName,
     startedAt: recordedAt,
     lastUpdatedAt: recordedAt,
+    startElapsedMs,
+    endElapsedMs: startElapsedMs,
     startIndex,
     endIndex: startIndex,
     routePoints: [point],
@@ -549,10 +559,15 @@ async function saveSegment(session, segment, endedAt = new Date().toISOString())
         ...segment,
         startIndex: 0,
         endIndex: Math.max(0, renderableRoutePoints.length - 1),
+        endElapsedMs: Number.isFinite(segment.endElapsedMs) ? segment.endElapsedMs : playedDurationMs,
       }, Math.max(0, renderableRoutePoints.length - 1))],
       playedDurationMs,
       startedAt: segment.startedAt,
       recordedAt: endedAt,
+      playlistId: session.playlistId || '',
+      spotifyPlaylistId: session.spotifyPlaylistId || '',
+      spotifyPlaylistUrl: session.spotifyPlaylistUrl || '',
+      recordingMode: session.recordingMode || '',
       publishPublic: false,
     });
   } catch (error) {
@@ -571,7 +586,7 @@ export async function getMusicMapRecordingSession() {
     };
   }
 
-  if (isExpired(session)) {
+  if (isExpired(session) || isPlaylistComplete(session)) {
     return stopMusicMapRecordingSession();
   }
 
@@ -590,6 +605,7 @@ export async function startMusicMapRecordingSession({
   initialTrack = null,
   initialPlaybackState = null,
   trackPlaylist = [],
+  playlist = null,
 } = {}) {
   await AsyncStorage.removeItem(MUSIC_MAP_STOPPING_KEY);
   await clearSegmentSaveLocks();
@@ -600,14 +616,20 @@ export async function startMusicMapRecordingSession({
   const firstPlaylistTrack = normalizedPlaylist[0] || null;
   const track = firstPlaylistTrack || (hasValidTrack(initialTrack) ? initialTrack : null);
   const initialRoutePoint = point ? buildRoutePoint(point, 0) : null;
-  const currentSegment = track && initialRoutePoint ? buildSegment(track, initialRoutePoint, now, placeName, 0) : null;
+  const currentSegment = track && initialRoutePoint ? buildSegment(track, initialRoutePoint, now, placeName, 0, 0) : null;
   const session = {
     id: `music-map-session-${Date.now()}`,
     isActive: true,
     userId: ownerId,
     placeName,
     startedAt: now,
+    recordingStartedAt: now,
     lastUpdatedAt: now,
+    playlistId: playlist?.id || '',
+    spotifyPlaylistId: playlist?.spotifyPlaylistId || '',
+    spotifyPlaylistUrl: playlist?.spotifyPlaylistUrl || '',
+    spotifyPlaylistUri: playlist?.spotifyUri || '',
+    recordingMode: 'ownerPlaylist',
     trackPlaylist: normalizedPlaylist,
     playlistMode: normalizedPlaylist.length > 0 ? 'internal-track-playlist' : '',
     currentSegment,
@@ -645,7 +667,15 @@ export async function stopMusicMapRecordingSession() {
   }
 
   const endedAt = new Date().toISOString();
-  const saved = await saveSegment(session, session.currentSegment, endedAt).catch(() => null);
+  const finalElapsedMs = getElapsedMs(session);
+  const finalSegment = session.currentSegment
+    ? { ...session.currentSegment, endedAt, endElapsedMs: finalElapsedMs }
+    : null;
+  if (finalSegment) {
+    session.currentSegment = finalSegment;
+    session.routeSegments = upsertRouteSegment(session, finalSegment);
+  }
+  const saved = await saveSegment(session, finalSegment, endedAt).catch(() => null);
   await AsyncStorage.removeItem(MUSIC_MAP_SESSION_KEY);
   await clearSegmentSaveLocks();
 
@@ -689,7 +719,13 @@ export async function recordCurrentMusicMapPlayback({
     }
 
     const nowMs = Date.now();
-    const playlistSnapshot = getPlaylistTrackAtElapsed(session, getElapsedMs(session, nowMs));
+    if (isPlaylistComplete(session, nowMs)) {
+      const stopped = await stopMusicMapRecordingSession();
+      return { recorded: false, reason: 'playlist-complete', stopped };
+    }
+
+    const elapsedMs = getElapsedMs(session, nowMs);
+    const playlistSnapshot = getPlaylistTrackAtElapsed(session, elapsedMs);
     let effectivePlaybackState = playlistSnapshot?.track
       ? sanitizePlaybackState({
         isPlaying: true,
@@ -744,8 +780,16 @@ export async function recordCurrentMusicMapPlayback({
       session.routeSegments = upsertRouteSegment(session, {
         ...currentSegment,
         endedAt: recordedAt,
+        endElapsedMs: playlistSnapshot?.startedAtMs ?? elapsedMs,
       });
-      session.currentSegment = buildSegment(track, point, recordedAt, placeName || session.placeName || '', startIndex);
+      session.currentSegment = buildSegment(
+        track,
+        point,
+        recordedAt,
+        placeName || session.placeName || '',
+        startIndex,
+        playlistSnapshot?.startedAtMs ?? elapsedMs
+      );
       session.routeSegments = upsertRouteSegment(session, session.currentSegment);
       scheduleAlbumColorResolution(session, track);
     } else if (currentSegment?.trackKey && isSameTrack(currentSegment, track)) {
@@ -772,6 +816,7 @@ export async function recordCurrentMusicMapPlayback({
         placeName: placeName || currentSegment.placeName || session.placeName || '',
         routePoints: nextRoutePoints,
         endIndex: Math.max(currentSegment.startIndex || 0, (session.routePoints || []).length - 1),
+        endElapsedMs: elapsedMs,
         lastUpdatedAt: recordedAt,
         pausedAt: '',
         shouldBreakRoute: false,
@@ -781,7 +826,14 @@ export async function recordCurrentMusicMapPlayback({
       const point = getStablePointForNewSegment(session, buildRoutePoint(pointCoords, 0));
       session.routePoints = appendSessionRoutePoint(session, point);
       const startIndex = Math.max(0, (session.routePoints || []).length - 1);
-      session.currentSegment = buildSegment(track, point, recordedAt, placeName || session.placeName || '', startIndex);
+      session.currentSegment = buildSegment(
+        track,
+        point,
+        recordedAt,
+        placeName || session.placeName || '',
+        startIndex,
+        playlistSnapshot?.startedAtMs ?? elapsedMs
+      );
       session.routeSegments = upsertRouteSegment(session, session.currentSegment);
       scheduleAlbumColorResolution(session, track);
     }

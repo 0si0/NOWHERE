@@ -38,10 +38,10 @@ const UI = {
 };
 
 const FEATURE_ACTIONS = [
-  { key: 'place', label: '장소에 남기기', icon: 'location-outline', screen: 'PlaceSetup' },
+  { key: 'place', label: '자동재생하기', icon: 'location-outline', screen: 'PlaceSetup' },
   { key: 'map', label: '뮤직지도', icon: 'map-outline', screen: 'MusicMap' },
   { key: 'like', label: '좋아요', icon: 'heart-outline' },
-  { key: 'share', label: 'Shall We Share', icon: 'arrow-redo-outline', screen: 'Vibe' },
+  { key: 'share', label: '이곳에 한마디', icon: 'arrow-redo-outline', screen: 'Vibe' },
 ];
 
 const SPOTIFY_REQUIRED_SLOT = {

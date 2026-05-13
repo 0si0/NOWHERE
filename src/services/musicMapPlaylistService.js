@@ -32,6 +32,7 @@ function normalizeTrack(track = {}) {
     color: track.albumColor || track.color || getInitialAlbumColor(track) || DEFAULT_ALBUM_COLOR,
     spotifyUri,
     spotifyUrl: String(track.spotifyUrl || '').trim(),
+    spotifyContextUri: String(track.spotifyContextUri || track.contextUri || '').trim(),
     durationMs: Math.max(30000, Number(track.durationMs || 0) || 180000),
   };
 }
@@ -66,6 +67,12 @@ function normalizePlaylist(playlist = {}, index = 0) {
   return {
     id,
     name: String(playlist.name || `트랙 플레이리스트 ${index + 1}`).trim(),
+    sourceType: String(playlist.sourceType || '').trim(),
+    spotifyUri: String(playlist.spotifyUri || '').trim(),
+    spotifyPlaylistId: String(playlist.spotifyPlaylistId || playlist.playlistId || '').trim(),
+    spotifyPlaylistUrl: String(playlist.spotifyPlaylistUrl || '').trim(),
+    spotifyStartUrl: String(playlist.spotifyStartUrl || '').trim(),
+    ownerPlaylistTrackSignature: String(playlist.ownerPlaylistTrackSignature || '').trim(),
     tracks,
     createdAt: playlist.createdAt || now,
     updatedAt: playlist.updatedAt || now,
@@ -189,6 +196,110 @@ export async function searchMusicMapTracks(query, limit = 8) {
   } catch (error) {
     return [];
   }
+}
+
+function extractSpotifyPlaylistId(input = '') {
+  const value = String(input || '').trim();
+  if (!value) return '';
+
+  if (value.startsWith('spotify:playlist:')) {
+    return value.split(':')[2] || '';
+  }
+
+  const match = value.match(/open\.spotify\.com\/playlist\/([^?/#]+)/i);
+  return match?.[1] || '';
+}
+
+export async function importSpotifyPlaylistTracks(input, limit = MAX_TRACK_PLAYLIST_ITEMS) {
+  const playlistId = extractSpotifyPlaylistId(input);
+  if (!playlistId) {
+    throw new Error('Spotify 플레이리스트 링크를 확인해주세요.');
+  }
+
+  const spotifyContextUri = `spotify:playlist:${playlistId}`;
+  const response = await callCloudFunctionOptionalAuth('getSpotifyPlaylistTracks', {
+    playlistId,
+    limit: Math.max(1, Math.min(Number(limit) || MAX_TRACK_PLAYLIST_ITEMS, 50)),
+  });
+  const tracks = dedupeTracks((response?.tracks || []).map((track) => ({
+    ...track,
+    spotifyContextUri,
+  })));
+
+  if (!tracks.length) {
+    throw new Error('이 플레이리스트에서 앨범 이미지가 있는 곡을 찾지 못했습니다.');
+  }
+
+  return {
+    id: `spotify-playlist-${playlistId}`,
+    name: String(response?.playlistName || 'Spotify 플레이리스트').trim(),
+    spotifyUri: response?.spotifyUri || spotifyContextUri,
+    tracks,
+  };
+}
+
+function getSpotifyTrackIdFromUri(uri = '') {
+  const value = String(uri || '').trim();
+  if (value.startsWith('spotify:track:')) {
+    return value.split(':')[2] || '';
+  }
+  const match = value.match(/open\.spotify\.com\/track\/([^?/#]+)/i);
+  return match?.[1] || '';
+}
+
+function buildTrackSignature(tracks = []) {
+  return (Array.isArray(tracks) ? tracks : [])
+    .map((track) => String(track?.spotifyUri || track?.uri || track?.id || '').trim())
+    .filter(Boolean)
+    .join('|');
+}
+
+function buildSpotifyStartUrl(tracks = [], spotifyContextUri = '') {
+  const firstTrack = (Array.isArray(tracks) ? tracks : []).find((track) => track?.spotifyUri || track?.uri);
+  const trackId = getSpotifyTrackIdFromUri(firstTrack?.spotifyUri || firstTrack?.uri || '');
+  if (!trackId || !spotifyContextUri) {
+    return '';
+  }
+  return `https://open.spotify.com/track/${encodeURIComponent(trackId)}?context=${encodeURIComponent(spotifyContextUri)}`;
+}
+
+export async function createOwnerMusicMapSpotifyPlaylist(playlist = {}) {
+  const tracks = dedupeTracks(playlist.tracks || []);
+  const spotifyTracks = tracks.filter((track) => String(track.spotifyUri || '').startsWith('spotify:track:'));
+  if (!spotifyTracks.length) {
+    throw new Error('Spotify URI가 있는 곡을 먼저 추가해주세요.');
+  }
+
+  const response = await callCloudFunctionOptionalAuth('createOwnerMusicMapPlaylist', {
+    playlistName: playlist.name || 'Music Map',
+    tracks: spotifyTracks.map((track) => ({
+      id: track.id,
+      trackId: track.trackId,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      albumArtUrl: track.albumArtUrl || track.artworkUrl,
+      artworkUrl: track.albumArtUrl || track.artworkUrl,
+      albumColor: track.albumColor || track.color,
+      spotifyUri: track.spotifyUri,
+      durationMs: track.durationMs,
+    })),
+  });
+
+  const spotifyContextUri = String(response?.spotifyUri || '').trim();
+  const contextTracks = tracks.map((track) => ({
+    ...track,
+    spotifyContextUri,
+  }));
+
+  return {
+    spotifyPlaylistId: String(response?.spotifyPlaylistId || response?.playlistId || '').trim(),
+    spotifyPlaylistUrl: String(response?.spotifyPlaylistUrl || '').trim(),
+    spotifyUri: spotifyContextUri,
+    spotifyStartUrl: buildSpotifyStartUrl(contextTracks, spotifyContextUri),
+    ownerPlaylistTrackSignature: buildTrackSignature(contextTracks),
+    tracks: contextTracks,
+  };
 }
 
 export async function getTrendingMusicMapTracks(limit = 8) {

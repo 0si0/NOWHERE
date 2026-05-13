@@ -52,9 +52,11 @@ import {
   sanitizeMusicMapRecordInput,
   sanitizePlayRecordInput,
   sanitizeSavedPlaceInput,
+  sanitizeShallWeShareInput,
   sanitizeVibePayload,
 } from './firebaseValidation';
 import { cacheAutoPlayPlaces } from './autoPlayService';
+import { getDistanceMeters } from './locationService';
 
 const SESSION_ID_KEY = '@nowhere/session-id';
 const LOCAL_APP_USER_ID_KEY = '@nowhere/local-app-user-id';
@@ -68,6 +70,7 @@ const LOCAL_USER_PREFIX = 'local-user-';
 const MAX_LOCAL_LISTENING_EVENTS = 500;
 const MAX_LOCAL_MUSIC_MAP_RECORDS = 800;
 const MUSIC_MAP_RECORD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SHALL_WE_SHARE_RADIUS_M = 350;
 const AUTH_LOG_PREFIX = '[NOWHERE Firebase Auth]';
 
 function getAuthDebugSnapshot(user = null) {
@@ -98,6 +101,10 @@ function getComparableTimestamp(value) {
 
   const asDate = new Date(value);
   return Number.isNaN(asDate.getTime()) ? 0 : asDate.getTime();
+}
+
+function getKstDayKey(date = new Date()) {
+  return new Date(date.getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
 function getMusicMapRecordCutoffIso() {
@@ -329,6 +336,10 @@ function getMusicMapRecordsCollection(db, userId) {
 
 function getMusicMapPublicRecordsCollection(db) {
   return collection(db, 'musicMapPublicRecords');
+}
+
+function getShallWeShareRecordsCollection(db) {
+  return collection(db, 'shallWeShareRecords');
 }
 
 function getConsentCollection(db, userId) {
@@ -1196,6 +1207,91 @@ export async function getTopTracksForPlace(userId, geohash, maxTracks = 3) {
   return Array.from(aggregation.values())
     .sort((left, right) => right.plays - left.plays)
     .slice(0, maxTracks);
+}
+
+export function getShallWeShareDayKey(date = new Date()) {
+  return getKstDayKey(date);
+}
+
+export async function hasPostedShallWeShareToday(userId) {
+  const { auth, db } = assertFirebaseConfigured();
+  const ownerId = assertAuthenticatedUser(auth, userId);
+  const dayKey = getKstDayKey();
+  const recordRef = doc(getShallWeShareRecordsCollection(db), `${ownerId}_${dayKey}`);
+  const snapshot = await getDoc(recordRef);
+  return snapshot.exists();
+}
+
+export async function saveShallWeShareRecord(input) {
+  const { auth, db } = assertFirebaseConfigured();
+  const ownerId = assertAuthenticatedUser(auth, input.userId);
+  const dayKey = getKstDayKey();
+  const sanitized = sanitizeShallWeShareInput({
+    ...input,
+    userId: ownerId,
+    dayKey,
+  });
+  const recordRef = doc(getShallWeShareRecordsCollection(db), `${ownerId}_${dayKey}`);
+  const existing = await getDoc(recordRef);
+  if (existing.exists()) {
+    throw new Error('오늘은 이미 이 공간에 음악을 남겼어요.');
+  }
+
+  await setDoc(recordRef, {
+    ...sanitized,
+    createdAt: serverTimestamp(),
+  });
+
+  return {
+    id: recordRef.id,
+    ...sanitized,
+  };
+}
+
+export async function getNearbyShallWeShareRecords({
+  userId,
+  latitude,
+  longitude,
+  radiusMeters = SHALL_WE_SHARE_RADIUS_M,
+  maxRecords = 40,
+} = {}) {
+  const { auth, db } = assertFirebaseConfigured();
+  assertAuthenticatedUser(auth, userId);
+  if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+    return [];
+  }
+
+  const sharesQuery = query(
+    getShallWeShareRecordsCollection(db),
+    orderBy('createdAt', 'desc'),
+    limit(Math.max(10, Math.min(Number(maxRecords) || 40, 80)))
+  );
+  const snapshot = await getDocs(sharesQuery);
+  const records = snapshot.docs.map((item) => {
+    const data = item.data();
+    const distanceMeters = getDistanceMeters(
+      latitude,
+      longitude,
+      Number(data.latitude),
+      Number(data.longitude)
+    );
+    return {
+      id: item.id,
+      ...data,
+      distanceMeters,
+    };
+  });
+
+  return records
+    .filter((record) => Number.isFinite(record.distanceMeters) && record.distanceMeters <= radiusMeters)
+    .sort((left, right) => {
+      const distanceDiff = left.distanceMeters - right.distanceMeters;
+      if (Math.abs(distanceDiff) > 30) {
+        return distanceDiff;
+      }
+      return getComparableTimestamp(right.createdAt || right.createdAtIso) -
+        getComparableTimestamp(left.createdAt || left.createdAtIso);
+    });
 }
 
 export async function saveUserConsent(input) {

@@ -223,7 +223,15 @@
     var map;
     var overlays = [];
     var polylines = [];
-    var latestPayload = { records: [], mode: 'pin', selectedRecordId: '' };
+    var latestPayload = {
+      records: [],
+      mode: 'pin',
+      selectedRecordId: '',
+      fixedCenter: false,
+      disableGestures: false,
+      shouldFocusSelectedRecord: true,
+      center: null
+    };
 
     function post(payload) {
       if (window.ReactNativeWebView) {
@@ -471,6 +479,32 @@
       }
     }
 
+    function getPayloadCenter(payload) {
+      var centerPoint = payload && payload.center ? payload.center : null;
+      if (!centerPoint ||
+        typeof centerPoint.latitude !== 'number' ||
+        typeof centerPoint.longitude !== 'number') {
+        return null;
+      }
+      return new kakao.maps.LatLng(centerPoint.latitude, centerPoint.longitude);
+    }
+
+    function applyMapControls(payload) {
+      if (!map || !payload) return;
+      if (typeof map.setDraggable === 'function') {
+        map.setDraggable(payload.disableGestures !== true);
+      }
+      if (typeof map.setZoomable === 'function') {
+        map.setZoomable(payload.disableGestures !== true);
+      }
+      if (payload.fixedCenter === true) {
+        var fixedCenter = getPayloadCenter(payload);
+        if (fixedCenter) {
+          map.setCenter(fixedCenter);
+        }
+      }
+    }
+
     function focusRecord(record) {
       var position = getRecordLocation(record);
       if (!position) return;
@@ -489,6 +523,7 @@
       }
       latestPayload = payload || latestPayload;
       var records = latestPayload.records || [];
+      applyMapControls(latestPayload);
       clearMap();
       records.forEach(function(record) {
         if (record.recordType === 'pin') {
@@ -502,11 +537,12 @@
       var selectedRecord = records.find(function(record) {
         return record.id === latestPayload.selectedRecordId;
       });
-      if (selectedRecord) {
+      if (selectedRecord && latestPayload.shouldFocusSelectedRecord !== false && latestPayload.fixedCenter !== true) {
         focusRecord(selectedRecord);
-      } else if (latestPayload.shouldFit !== false) {
+      } else if (latestPayload.shouldFit !== false && latestPayload.fixedCenter !== true) {
         fitRecords(records);
       }
+      applyMapControls(latestPayload);
     };
 
     function initMap() {

@@ -18,6 +18,7 @@ const telegramBotToken = defineSecret('TELEGRAM_BOT_TOKEN');
 const telegramChatId = defineSecret('TELEGRAM_CHAT_ID');
 const spotifyOwnerClientId = defineSecret('SPOTIFY_OWNER_CLIENT_ID');
 const spotifyOwnerClientSecret = defineSecret('SPOTIFY_OWNER_CLIENT_SECRET');
+const spotifyOwnerRefreshToken = defineSecret('SPOTIFY_OWNER_REFRESH_TOKEN');
 const DAILY_GENERAL_AI_LIMIT = 30;
 const DAILY_CHALLENGE_AI_LIMIT = 5;
 const DEFAULT_RECOMMENDATION_MODEL = process.env.OPENAI_RECOMMENDATION_MODEL || 'gpt-4.1-nano';
@@ -25,6 +26,10 @@ const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const SPOTIFY_REQUESTED_TREND_PLAYLIST_ID = '37i9dQZEVXbJZGli0rRP3r';
 const SPOTIFY_KR_TOP_50_PLAYLIST_ID = '37i9dQZEVXbNxXF4SkHj9F';
 let ownerSpotifyTokenCache = {
+  accessToken: '',
+  accessTokenExpiresAt: 0,
+};
+let ownerSpotifyUserTokenCache = {
   accessToken: '',
   accessTokenExpiresAt: 0,
 };
@@ -67,6 +72,14 @@ function getSpotifyOwnerClientSecret() {
     throw new HttpsError('failed-precondition', 'SPOTIFY_OWNER_CLIENT_SECRET is not configured.');
   }
   return clientSecret;
+}
+
+function getSpotifyOwnerRefreshToken() {
+  const refreshToken = process.env.SPOTIFY_OWNER_REFRESH_TOKEN || spotifyOwnerRefreshToken.value();
+  if (!refreshToken) {
+    throw new HttpsError('failed-precondition', 'SPOTIFY_OWNER_REFRESH_TOKEN is not configured.');
+  }
+  return refreshToken;
 }
 
 function firstString(source = {}, keys = []) {
@@ -125,6 +138,30 @@ function uniqueSpotifyTracks(tracks = []) {
   });
 }
 
+function normalizeOwnerPlaylistInputTrack(track = {}) {
+  const spotifyUri = firstString(track, ['spotifyUri', 'uri']);
+  if (!spotifyUri.startsWith('spotify:track:')) {
+    return null;
+  }
+  return {
+    id: firstString(track, ['id', 'trackId']) || spotifyUri,
+    spotifyUri,
+    title: cleanText(track.title || track.trackName || track.name, 160),
+    artist: cleanText(track.artist || track.artistName, 160),
+    album: cleanText(track.album || track.albumName, 160),
+    artworkUrl: cleanText(track.artworkUrl || track.albumArtUrl, 500),
+    durationMs: Math.max(30000, Number(track.durationMs || 0) || 180000),
+  };
+}
+
+function buildOwnerMusicMapPlaylistName(name = '') {
+  const trimmedName = cleanText(name, 80);
+  if (trimmedName) {
+    return `NOWHERE · ${trimmedName}`;
+  }
+  return `NOWHERE Music Map · ${getKstDayKey()}`;
+}
+
 async function getOwnerSpotifyAccessToken() {
   if (
     ownerSpotifyTokenCache.accessToken &&
@@ -160,6 +197,44 @@ async function getOwnerSpotifyAccessToken() {
   return json.access_token;
 }
 
+async function getOwnerSpotifyUserAccessToken() {
+  if (
+    ownerSpotifyUserTokenCache.accessToken &&
+    ownerSpotifyUserTokenCache.accessTokenExpiresAt > Date.now() + 60 * 1000
+  ) {
+    return ownerSpotifyUserTokenCache.accessToken;
+  }
+
+  const credentials = Buffer
+    .from(`${getSpotifyOwnerClientId()}:${getSpotifyOwnerClientSecret()}`)
+    .toString('base64');
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: getSpotifyOwnerRefreshToken(),
+  });
+
+  const response = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${credentials}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: body.toString(),
+  });
+  const json = await response.json().catch(() => null);
+  if (!response.ok || !json?.access_token) {
+    logger.error('Owner Spotify user token refresh failed', {
+      status: response.status,
+      error: json?.error,
+      errorDescription: json?.error_description,
+    });
+    throw new HttpsError('failed-precondition', 'Owner Spotify user token refresh failed.');
+  }
+  ownerSpotifyUserTokenCache.accessToken = json.access_token;
+  ownerSpotifyUserTokenCache.accessTokenExpiresAt = Date.now() + Math.max(60, Number(json.expires_in || 3600)) * 1000;
+  return json.access_token;
+}
+
 async function ownerSpotifyJSONRequest(path, accessToken) {
   const response = await fetch(`https://api.spotify.com${path}`, {
     method: 'GET',
@@ -180,6 +255,37 @@ async function ownerSpotifyJSONRequest(path, accessToken) {
   return json;
 }
 
+async function ownerSpotifyWriteRequest(path, accessToken, { method = 'POST', body = null } = {}) {
+  const response = await fetch(`https://api.spotify.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text().catch(() => '');
+  let json = null;
+  if (text) {
+    try {
+      json = JSON.parse(text);
+    } catch (error) {
+      json = null;
+    }
+  }
+  if (!response.ok) {
+    logger.error('Owner Spotify write request failed', {
+      path,
+      method,
+      status: response.status,
+      error: json?.error || text,
+    });
+    throw new HttpsError('failed-precondition', 'Owner Spotify playlist write request failed.');
+  }
+  return json || {};
+}
+
 async function getOwnerPlaylistTracks(accessToken, playlistId, limit) {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 50));
   const playlistPath = `/v1/playlists/${playlistId}/tracks?limit=${safeLimit}&offset=0&market=KR&additional_types=track`;
@@ -190,6 +296,17 @@ async function getOwnerPlaylistTracks(accessToken, playlistId, limit) {
     .map((item) => item?.track)
     .filter((track) => track?.type === 'track')
     .map(normalizeSpotifyTrack);
+}
+
+async function getOwnerPlaylistSummary(accessToken, playlistId) {
+  const trimmedPlaylistId = cleanText(playlistId, 120);
+  if (!trimmedPlaylistId) {
+    return null;
+  }
+  return ownerSpotifyJSONRequest(
+    `/v1/playlists/${trimmedPlaylistId}?fields=id,name,uri,images`,
+    accessToken
+  );
 }
 
 async function getOwnerKoreaTop50Tracks(accessToken, limit) {
@@ -619,6 +736,124 @@ exports.getDemoSpotifyTracks = onCall({
     requestedPlaylistId: SPOTIFY_REQUESTED_TREND_PLAYLIST_ID,
     playlistId: chartResult?.playlistId || '',
     chartTracks: uniqueSpotifyTracks(chartTracks.map((track, index) => ({ ...track, rank: index + 1 }))),
+  };
+});
+
+exports.getSpotifyPlaylistTracks = onCall({
+  timeoutSeconds: 20,
+  memory: '256MiB',
+  secrets: [spotifyOwnerClientId, spotifyOwnerClientSecret],
+}, async (request) => {
+  const playlistId = cleanText(request.data?.playlistId, 120);
+  if (!playlistId) {
+    throw new HttpsError('invalid-argument', 'Spotify playlistId is required.');
+  }
+
+  const limitValue = Number(request.data?.limit || 50);
+  const limit = Math.max(1, Math.min(Number.isFinite(limitValue) ? limitValue : 50, 50));
+  const accessToken = await getOwnerSpotifyAccessToken();
+  const [summary, tracks] = await Promise.all([
+    getOwnerPlaylistSummary(accessToken, playlistId).catch(() => null),
+    getOwnerPlaylistTracks(accessToken, playlistId, limit),
+  ]);
+
+  return {
+    ok: true,
+    provider: 'spotify-owner-demo',
+    playlistId,
+    playlistName: firstString(summary || {}, ['name']),
+    spotifyUri: firstString(summary || {}, ['uri']) || `spotify:playlist:${playlistId}`,
+    tracks: uniqueSpotifyTracks(tracks),
+  };
+});
+
+exports.createOwnerMusicMapPlaylist = onCall({
+  timeoutSeconds: 30,
+  memory: '256MiB',
+  secrets: [spotifyOwnerClientId, spotifyOwnerClientSecret, spotifyOwnerRefreshToken],
+}, async (request) => {
+  const rawTracks = Array.isArray(request.data?.tracks) ? request.data.tracks : [];
+  const tracks = rawTracks
+    .map(normalizeOwnerPlaylistInputTrack)
+    .filter(Boolean)
+    .slice(0, 10);
+
+  if (!tracks.length) {
+    throw new HttpsError('invalid-argument', 'Spotify track URIs are required.');
+  }
+
+  const usedUris = new Set();
+  const uris = tracks
+    .map((track) => track.spotifyUri)
+    .filter((uri) => {
+      if (!uri || usedUris.has(uri)) return false;
+      usedUris.add(uri);
+      return true;
+    });
+
+  if (!uris.length) {
+    throw new HttpsError('invalid-argument', 'Valid Spotify track URIs are required.');
+  }
+
+  const accessToken = await getOwnerSpotifyUserAccessToken();
+  const ownerProfile = await ownerSpotifyJSONRequest('/v1/me', accessToken);
+  const ownerId = firstString(ownerProfile || {}, ['id']);
+  if (!ownerId) {
+    throw new HttpsError('failed-precondition', 'Owner Spotify profile request failed.');
+  }
+
+  const playlistName = buildOwnerMusicMapPlaylistName(request.data?.playlistName);
+  const playlist = await ownerSpotifyWriteRequest(
+    `/v1/users/${encodeURIComponent(ownerId)}/playlists`,
+    accessToken,
+    {
+      method: 'POST',
+      body: {
+        name: playlistName,
+        public: true,
+        collaborative: false,
+        description: 'NOWHERE Music Map recording playlist',
+      },
+    }
+  );
+  const playlistId = firstString(playlist, ['id']);
+  if (!playlistId) {
+    throw new HttpsError('failed-precondition', 'Owner Spotify playlist creation failed.');
+  }
+
+  await ownerSpotifyWriteRequest(
+    `/v1/playlists/${encodeURIComponent(playlistId)}/tracks`,
+    accessToken,
+    {
+      method: 'POST',
+      body: {
+        uris,
+        position: 0,
+      },
+    }
+  );
+
+  const spotifyUri = firstString(playlist, ['uri']) || `spotify:playlist:${playlistId}`;
+  const externalUrl = playlist?.external_urls?.spotify
+    || `https://open.spotify.com/playlist/${encodeURIComponent(playlistId)}`;
+
+  logger.info('Owner Music Map Spotify playlist created.', {
+    playlistId,
+    trackCount: uris.length,
+  });
+
+  return {
+    ok: true,
+    provider: 'spotify-owner-demo',
+    playlistId,
+    playlistName,
+    spotifyUri,
+    spotifyPlaylistId: playlistId,
+    spotifyPlaylistUrl: externalUrl,
+    tracks: tracks.map((track) => ({
+      ...track,
+      spotifyContextUri: spotifyUri,
+    })),
   };
 });
 

@@ -5,11 +5,13 @@ import NativeNowherePlayer, {
   isNativeNowherePlayerAvailable,
 } from 'nowhere-player';
 import { API_KEYS } from '../constants';
+import {
+  DEFAULT_MUSIC_MAP_TRACK_DURATION_MS,
+  normalizeMusicMapDurationMs,
+} from './musicMapDuration';
 
 const PENDING_PLAYBACK_KEY = '@nowhere/music-map-notification-playback';
 const NOTIFICATION_PREFIX = 'nowhere-music-map-sequential';
-const MIN_TRACK_DURATION_MS = 30000;
-const DEFAULT_TRACK_DURATION_MS = 180000;
 const MAX_NOTIFICATION_TRACKS = 10;
 const ACTION_NAME = 'musicMapSequentialPlayback';
 
@@ -18,10 +20,7 @@ function getReturnBaseUri() {
 }
 
 function getTrackDurationMs(track = {}) {
-  const durationMs = Number(track.durationMs || 0);
-  return Number.isFinite(durationMs) && durationMs > 0
-    ? Math.max(MIN_TRACK_DURATION_MS, durationMs)
-    : DEFAULT_TRACK_DURATION_MS;
+  return normalizeMusicMapDurationMs(track.durationMs, DEFAULT_MUSIC_MAP_TRACK_DURATION_MS);
 }
 
 function normalizeNotificationTrack(track = {}) {

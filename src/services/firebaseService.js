@@ -1133,6 +1133,39 @@ export async function getMusicMapRecords(userId, maxRecords = 200) {
   ]).slice(0, maxRecords);
 }
 
+export async function deleteMusicMapRecords(userId, recordIds = []) {
+  const ownerId = userId || await getOrCreateAppUserId();
+  const ids = Array.from(new Set((Array.isArray(recordIds) ? recordIds : [recordIds])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean)));
+  if (!ids.length) {
+    return { deleted: 0 };
+  }
+
+  const localRecords = await readLocalMusicMapRecords();
+  const nextLocalRecords = localRecords.filter((record) => (
+    record.userId !== ownerId || !ids.includes(String(record.id || ''))
+  ));
+  if (nextLocalRecords.length !== localRecords.length) {
+    await writeLocalMusicMapRecords(nextLocalRecords);
+  }
+
+  if (!isFirebaseConfiguredInClient()) {
+    return { deleted: ids.length };
+  }
+
+  const { auth, db } = assertFirebaseConfigured();
+  if (shouldUseLocalSavedPlaces(auth, ownerId)) {
+    return { deleted: ids.length };
+  }
+
+  const validatedOwnerId = assertAuthenticatedUser(auth, ownerId);
+  await Promise.all(ids.map((recordId) => (
+    deleteDoc(doc(getMusicMapRecordsCollection(db, validatedOwnerId), recordId)).catch(() => null)
+  )));
+  return { deleted: ids.length };
+}
+
 export async function getMusicMapPublicRecords(maxRecords = 200) {
   const localRecords = await readLocalMusicMapPublicRecords();
 

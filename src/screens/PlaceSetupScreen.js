@@ -19,6 +19,7 @@ import { API_KEYS, MAX_AUTOPLAY_PLACES, RADIUS_OPTIONS } from '../constants';
 import { LocationContext } from '../contexts/LocationContext';
 import { useSession } from '../contexts/SessionContext';
 import {
+  archiveSavedPlace,
   getOrCreateAppUserId,
   getSavedPlaces,
   saveSavedPlace,
@@ -150,7 +151,7 @@ function TrackResultCard({ track, isSelected, onPress }) {
   );
 }
 
-function SavedPlaceCard({ place, onLoad }) {
+function SavedPlaceCard({ place, onLoad, onDelete }) {
   const track = normalizePlayTargetForForm(place.playTarget || place);
   const label = track
     ? `${track.type === 'playlist' ? '플레이리스트' : '곡'} · ${track.title}${track.artist ? ` · ${track.artist}` : ''}`
@@ -170,6 +171,9 @@ function SavedPlaceCard({ place, onLoad }) {
       <View style={styles.savedPlaceActions}>
         <TouchableOpacity style={styles.savedActionPrimary} onPress={() => onLoad(place)}>
           <Text style={styles.savedActionPrimaryText}>수정</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.savedActionDanger} onPress={() => onDelete(place)}>
+          <Text style={styles.savedActionDangerText}>삭제</Text>
         </TouchableOpacity>
       </View>
     </View>
@@ -270,6 +274,36 @@ export default function PlaceSetupScreen({ navigation }) {
   useEffect(() => {
     loadSavedPlaces();
   }, [loadSavedPlaces]);
+
+  const handleDeleteSavedPlace = useCallback((place) => {
+    if (!place?.id) {
+      return;
+    }
+    Alert.alert(
+      '자동재생 장소 삭제',
+      `"${place.name || '저장된 장소'}"를 삭제할까요?`,
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '삭제',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const ownerId = await resolveOwnerId();
+              await archiveSavedPlace(ownerId, place.id);
+              if (editingPlaceId === place.id) {
+                resetForm();
+              }
+              await loadSavedPlaces();
+              await reloadAutoPlayPlaces?.().catch(() => null);
+            } catch (error) {
+              Alert.alert('삭제 실패', error.message || '저장된 장소를 삭제하지 못했습니다.');
+            }
+          },
+        },
+      ]
+    );
+  }, [editingPlaceId, loadSavedPlaces, reloadAutoPlayPlaces, resetForm, resolveOwnerId]);
 
   const handleSearchTracks = async () => {
     const query = trackQuery.trim();
@@ -649,6 +683,7 @@ export default function PlaceSetupScreen({ navigation }) {
                 key={place.id}
                 place={place}
                 onLoad={applyPlaceToForm}
+                onDelete={handleDeleteSavedPlace}
               />
             ))
           )}
@@ -904,7 +939,7 @@ const styles = StyleSheet.create({
   savedPlaceMeta: { color: UI.textMuted, fontSize: 11, marginTop: 4 },
   savedPlaceActions: { flexDirection: 'row', gap: 10, marginTop: 14 },
   savedActionPrimary: {
-    alignSelf: 'flex-end',
+    flex: 1,
     minWidth: 82,
     backgroundColor: UI.surfaceStrong,
     borderWidth: 1,
@@ -915,4 +950,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   savedActionPrimaryText: { color: UI.peach, fontSize: 13, fontWeight: '900' },
+  savedActionDanger: {
+    minWidth: 76,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 110, 110, 0.42)',
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 110, 110, 0.08)',
+  },
+  savedActionDangerText: { color: '#FF9A9A', fontSize: 13, fontWeight: '900' },
 });

@@ -322,7 +322,7 @@ class NowherePlayerModule : Module() {
       playbackStatus = "loading"
       emitState()
 
-      playWithAppRemote(uri)
+      playWithWebApiThenAppRemoteFallback(uri, playbackQueue)
       isPlaying = true
       playbackStatus = "playing"
       emitState()
@@ -554,6 +554,24 @@ class NowherePlayerModule : Module() {
         continuation.resumeWithException(error)
       }
     )
+  }
+
+  private suspend fun playWithWebApiThenAppRemoteFallback(uri: String, queue: List<Map<String, Any?>>) {
+    try {
+      startSpotifyPlayback(uri, queue)
+    } catch (error: Throwable) {
+      if (!isNoActiveDeviceError(error) || appContext.currentActivity == null) {
+        throw error
+      }
+      playWithAppRemote(uri)
+    }
+  }
+
+  private fun isNoActiveDeviceError(error: Throwable): Boolean {
+    val message = error.localizedMessage ?: error.message ?: return false
+    return message.contains("NO_ACTIVE_DEVICE", ignoreCase = true) ||
+      message.contains("No active Spotify device", ignoreCase = true) ||
+      message.contains("No active device", ignoreCase = true)
   }
 
   private fun subscribeToPlayerState(remote: SpotifyAppRemote) {
@@ -918,7 +936,11 @@ class NowherePlayerModule : Module() {
   }
 
   private suspend fun refreshCurrentPlaybackState() = withContext(Dispatchers.IO) {
-    val token = accessToken ?: return@withContext
+    val token = accessToken ?: run {
+      isPlaying = false
+      playbackStatus = "notDetermined"
+      return@withContext
+    }
     val url = URL("https://api.spotify.com/v1/me/player/currently-playing")
     val connection = (url.openConnection() as HttpURLConnection).apply {
       requestMethod = "GET"
@@ -932,10 +954,21 @@ class NowherePlayerModule : Module() {
       val status = connection.responseCode
       if (status == 204) {
         isPlaying = false
-        playbackStatus = "paused"
+        currentTrack = null
+        positionMs = 0L
+        playbackQueue = emptyList()
+        playbackStatus = "noPlayback"
         return@withContext
       }
       if (status !in 200..299) {
+        isPlaying = false
+        currentTrack = null
+        playbackQueue = emptyList()
+        playbackStatus = if (status == 401 || status == 403) {
+          "playbackAccessDenied"
+        } else {
+          "playbackStateUnavailable"
+        }
         return@withContext
       }
 
@@ -972,6 +1005,11 @@ class NowherePlayerModule : Module() {
       } else {
         currentTrack = liveTrack
       }
+    } catch (error: Throwable) {
+      isPlaying = false
+      currentTrack = null
+      playbackQueue = emptyList()
+      playbackStatus = "playbackStateUnavailable"
     } finally {
       connection.disconnect()
     }
@@ -1056,7 +1094,8 @@ class NowherePlayerModule : Module() {
   private fun scheduleReturnToNowhere() {
     val context = appContext.reactContext ?: return
     val uri = returnToAppUri.takeIf { it.isNotBlank() } ?: return
-    Handler(Looper.getMainLooper()).postDelayed({
+    val handler = Handler(Looper.getMainLooper())
+    val returnToNowhere = {
       try {
         val returnIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
           data = Uri.parse(uri)
@@ -1074,7 +1113,10 @@ class NowherePlayerModule : Module() {
         context.startActivity(returnIntent)
       } catch (error: Throwable) {
       }
-    }, 1200L)
+    }
+    handler.postDelayed(returnToNowhere, 1800L)
+    handler.postDelayed(returnToNowhere, 4200L)
+    handler.postDelayed(returnToNowhere, 7200L)
   }
 
   private fun registerScreenStateReceiver() {

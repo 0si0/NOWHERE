@@ -156,33 +156,21 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
 
     AsyncFunction("prepareAutoPlayAsync") { (options: [String: Any]) async throws -> [String: Any?] in
       self.applyOptions(options)
+      try await self.ensureAuthorized()
       let primerTrack = options["autoPlayPrimer"] as? [String: Any]
       let primerUri = primerTrack.flatMap { self.spotifyUri(from: $0) }
-      if let primerUri {
-        try await self.startSpotifyPlaybackWithAppRemote(uri: primerUri)
-      } else {
-        try await self.openSpotify(uri: "spotify:")
-      }
-      if let primerTrack {
-        self.currentTrack = primerTrack.mapValues { Optional($0) }
-        self.playbackQueue = [self.currentTrack].compactMap { $0 }
-        self.currentQueueIndex = 0
-      }
-      self.isPlaying = primerUri != nil
-      self.playbackStatus = primerUri == nil ? "openedSpotify" : "playing"
+      try await self.startSpotifyPlaybackWithAppRemote(uri: primerUri ?? "")
+      self.playbackStatus = "preparingAutoPlay"
       self.lastError = nil
       self.emitState()
       return self.currentState()
     }
 
     AsyncFunction("playInBackgroundAsync") { (track: [String: Any], queue: [[String: Any]]) async throws -> [String: Any?] in
+      try await self.ensureAuthorized()
+
       let requestedTracks = queue.isEmpty ? [track] : queue
-      let resolvedTracks = requestedTracks.compactMap { requestedTrack -> [String: Any?]? in
-        guard self.spotifyUri(from: requestedTrack) != nil else {
-          return nil
-        }
-        return requestedTrack.mapValues { Optional($0) }
-      }
+      let resolvedTracks = try await self.resolvePlayableTracks(requestedTracks)
       guard let firstTrack = resolvedTracks.first, let uri = self.spotifyUri(from: firstTrack) else {
         throw NowherePlayerException("A Spotify URI is required before background playback can start.")
       }
@@ -194,12 +182,33 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       self.lastError = nil
       self.emitState()
 
-      try await self.startSpotifyPlaybackWithAppRemote(uri: uri)
-      self.isPlaying = true
-      self.playbackStatus = "playing"
-      self.lastError = nil
-      self.emitState()
-      return self.currentState()
+      do {
+        try await self.startSpotifyPlayback(uri: uri, queue: resolvedTracks)
+        self.isPlaying = true
+        self.playbackStatus = "playing"
+        self.lastError = nil
+        await self.refreshPlayerState()
+        self.emitState()
+        return self.currentState()
+      } catch let error as SpotifyAPIError {
+        if self.isNoActiveDeviceError(error) {
+          do {
+            try await self.startSpotifyPlaybackWithAppRemote(uri: uri)
+            self.isPlaying = true
+            self.playbackStatus = "openedSpotify"
+            self.lastError = nil
+            self.emitState()
+            return self.currentState()
+          } catch {
+            return self.playbackErrorState(SpotifyAPIError(
+              statusCode: 404,
+              message: error.localizedDescription,
+              reason: "APP_REMOTE_PLAYBACK_FAILED"
+            ))
+          }
+        }
+        return self.playbackErrorState(error)
+      }
     }
 
     AsyncFunction("playAsync") { (track: [String: Any], queue: [[String: Any]]) async throws -> [String: Any?] in
@@ -578,6 +587,23 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     try await appRemoteCoordinator.play(uri: uri)
   }
 
+  private func startSpotifyPlaybackWithFallback(uri: String, queue: [[String: Any?]]) async throws {
+    do {
+      try await startSpotifyPlayback(uri: uri, queue: queue)
+    } catch let error as SpotifyAPIError {
+      guard isNoActiveDeviceError(error), canUseForegroundAppRemote() else {
+        throw error
+      }
+      try await startSpotifyPlaybackWithAppRemote(uri: uri)
+    } catch {
+      throw error
+    }
+  }
+
+  private func canUseForegroundAppRemote() -> Bool {
+    UIApplication.shared.applicationState != .background
+  }
+
   private func searchSpotifyTracks(query: String, limit: Int) async throws -> [[String: Any?]] {
     guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
       return []
@@ -685,11 +711,17 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
 
   private func refreshPlayerState() async {
     guard accessToken != nil else {
+      isPlaying = false
+      playbackStatus = "notDetermined"
       return
     }
 
     do {
       guard let json = try await spotifyJSONRequest(path: "/v1/me/player/currently-playing", method: "GET") else {
+        isPlaying = false
+        currentTrack = nil
+        positionMs = 0
+        playbackStatus = "noPlayback"
         return
       }
 
@@ -709,8 +741,20 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
           }
         }
       }
+    } catch let error as SpotifyAPIError {
+      isPlaying = false
+      currentTrack = nil
+      if error.statusCode == 401 || error.statusCode == 403 {
+        playbackStatus = "playbackAccessDenied"
+      } else {
+        playbackStatus = "playbackStateUnavailable"
+      }
+      lastError = userFacingPlaybackMessage(for: error)
     } catch {
-      playbackStatus = accessToken == nil ? "idle" : playbackStatus
+      isPlaying = false
+      currentTrack = nil
+      playbackStatus = "playbackStateUnavailable"
+      lastError = error.localizedDescription
     }
   }
 
@@ -966,7 +1010,17 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
         }
       }
 
-      DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+      let returnToApp = {
+        UIApplication.shared.open(returnURL, options: [:]) { _ in }
+      }
+
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+        returnToApp()
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) {
+        returnToApp()
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 7.2) {
         UIApplication.shared.open(returnURL, options: [:]) { [weak self] _ in
           guard let self else { return }
           if self.returnBackgroundTask != .invalid {
@@ -1267,6 +1321,11 @@ private final class PlaybackNotificationDelegate: NSObject, UNUserNotificationCe
   ) {
     let source = notification.request.content.userInfo["source"] as? String
     if source == "nowhere-playback-notification" {
+      let action = notification.request.content.userInfo["action"] as? String
+      if action == "autoPlayPlacePlayback" {
+        completionHandler([.banner, .sound])
+        return
+      }
       completionHandler([])
       return
     }

@@ -19,6 +19,7 @@
         "NSLocationWhenInUseUsageDescription": "NOWHERE uses your location to auto-play music when you arrive at saved places.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "NOWHERE uses your location in the background to auto-play music when you arrive at saved places.",
         "NSLocationAlwaysUsageDescription": "NOWHERE uses your location in the background to auto-play music when you arrive at saved places.",
+        "NSPhotoLibraryAddUsageDescription": "NOWHERE saves your music diary cards to your photo library.",
         "LSApplicationQueriesSchemes": [
           "spotify"
         ],
@@ -72,6 +73,13 @@
         {
           "spotifyRedirectScheme": "com.nowhere.nowhere",
           "spotifyRedirectHost": "spotify-auth"
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "NOWHERE saves your music diary cards to your photo library.",
+          "savePhotosPermission": "NOWHERE saves your music diary cards to your photo library."
         }
       ]
     ]

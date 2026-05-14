@@ -10,7 +10,7 @@ import { callCloudFunctionOptionalAuth } from './firebaseService';
 const DEFAULT_COLOR = '#7CFFB2';
 const STOPPED_STATUS = 'stopped';
 const EXTERNAL_PLAYBACK_MAX_AGE_MS = 3 * 60 * 60 * 1000;
-const SPOTIFY_RETURN_DELAY_MS = 1400;
+const SPOTIFY_RETURN_DELAYS_MS = [1800, 4200, 7200];
 const USER_SPOTIFY_READ_SCOPES = [
   'app-remote-control',
   'user-read-currently-playing',
@@ -33,9 +33,11 @@ function scheduleReturnToNowhere() {
   if (!returnUri || Platform.OS === 'web') {
     return;
   }
-  setTimeout(() => {
-    Linking.openURL(returnUri).catch(() => null);
-  }, SPOTIFY_RETURN_DELAY_MS);
+  SPOTIFY_RETURN_DELAYS_MS.forEach((delayMs) => {
+    setTimeout(() => {
+      Linking.openURL(returnUri).catch(() => null);
+    }, delayMs);
+  });
 }
 
 function getNativeOptions(extraOptions = {}) {
@@ -224,6 +226,7 @@ async function openSpotifyUriFallback(track, queue = []) {
       await NativeNowherePlayer.openSpotifyUrlAsync(uri, getNativeOptions({
         skipAuthorization: true,
       }));
+      scheduleReturnToNowhere();
     } catch (nativeError) {
       try {
         await Linking.openURL(uri);

@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { callCloudFunctionOptionalAuth } from './firebaseService';
 import { DEFAULT_ALBUM_COLOR, getInitialAlbumColor, resolveAlbumColor } from './albumColorService';
+import { normalizeMusicMapDurationMs } from './musicMapDuration';
 
 const MUSIC_MAP_TRACK_PLAYLIST_KEY = '@nowhere/music-map-track-playlist-v1';
 const MUSIC_MAP_TRACK_PLAYLISTS_KEY = '@nowhere/music-map-track-playlists-v1';
@@ -13,6 +14,7 @@ function normalizeTrack(track = {}) {
   const artist = String(track.artist || track.artistName || '').trim();
   const spotifyUri = String(track.spotifyUri || track.uri || '').trim();
   const albumArtUrl = String(track.albumArtUrl || track.artworkUrl || track.imageUrl || '').trim();
+  const durationMs = normalizeMusicMapDurationMs(track.durationMs);
 
   if (!title || !artist || !albumArtUrl) {
     return null;
@@ -33,7 +35,7 @@ function normalizeTrack(track = {}) {
     spotifyUri,
     spotifyUrl: String(track.spotifyUrl || '').trim(),
     spotifyContextUri: String(track.spotifyContextUri || track.contextUri || '').trim(),
-    durationMs: Math.max(30000, Number(track.durationMs || 0) || 180000),
+    durationMs,
   };
 }
 

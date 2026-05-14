@@ -30,6 +30,11 @@ function MusicMapRoute(props) {
   return <MusicMapScreen {...props} />;
 }
 
+function MusicDiaryRoute(props) {
+  const MusicDiaryScreen = require('../screens/MusicDiaryScreen').default;
+  return <MusicDiaryScreen {...props} />;
+}
+
 function RootStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -38,6 +43,7 @@ function RootStack() {
       <Stack.Screen name="PlaceSetup" component={PlaceSetupScreen} options={{ presentation: 'modal' }} />
       <Stack.Screen name="Vibe" component={VibeScreen} options={{ presentation: 'modal' }} />
       <Stack.Screen name="MusicMap" component={MusicMapRoute} options={{ presentation: 'modal' }} />
+      <Stack.Screen name="MusicDiary" component={MusicDiaryRoute} options={{ presentation: 'modal' }} />
     </Stack.Navigator>
   );
 }

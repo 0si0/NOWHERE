@@ -25,14 +25,6 @@ final class SpotifyAppRemoteCoordinator: NSObject, SPTAppRemoteDelegate, SPTAppR
 
   private override init() {
     super.init()
-    tokenObserver = NotificationCenter.default.addObserver(
-      forName: Notification.Name("NowhereSpotifyOpenURL"),
-      object: nil,
-      queue: .main
-    ) { [weak self] notification in
-      guard let url = notification.object as? URL else { return }
-      self?.handleOpenURL(url)
-    }
     lifecycleObservers = [
       NotificationCenter.default.addObserver(
         forName: UIApplication.willResignActiveNotification,
@@ -47,6 +39,16 @@ final class SpotifyAppRemoteCoordinator: NSObject, SPTAppRemoteDelegate, SPTAppR
         queue: .main
       ) { [weak self] _ in
         self?.connectIfAuthorized()
+      },
+      NotificationCenter.default.addObserver(
+        forName: Notification.Name("NowhereSpotifyOpenURL"),
+        object: nil,
+        queue: .main
+      ) { [weak self] notification in
+        guard let url = notification.object as? URL else {
+          return
+        }
+        self?.handleOpenURL(url)
       }
     ]
   }

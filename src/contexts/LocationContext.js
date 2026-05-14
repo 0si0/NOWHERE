@@ -8,7 +8,6 @@ import { useSession } from './SessionContext';
 import {
   buildGeofenceRegions,
   cacheAutoPlayPlaces,
-  consumePendingAutoPlay,
   findAutoPlayCandidate,
   getSavedPlacePlayTarget,
   markAutoPlayTriggered,
@@ -18,6 +17,15 @@ import {
   writePendingAutoPlay,
   writeAutoPlayModeEnabled,
 } from '../services/autoPlayService';
+import {
+  cancelAutoPlayNotifications,
+  consumeAutoPlayNotificationUrl,
+  getAutoPlayNotificationPlaceId,
+  getInitialPlaybackNotificationUrl,
+  requestAutoPlayNotificationPermission,
+  scheduleAutoPlayNotification,
+  subscribeAutoPlayNotificationPress,
+} from '../services/autoPlayNotificationService';
 import {
   getOrCreateAppUserId,
   getSavedPlaces,
@@ -39,11 +47,14 @@ import {
 import {
   cancelMusicMapSequentialPlaybackNotifications,
   consumeMusicMapPlaybackNotificationUrl,
-  getInitialMusicMapPlaybackNotificationUrl,
   requestMusicMapPlaybackNotificationPermission,
   scheduleMusicMapSequentialPlaybackNotifications,
   subscribeMusicMapPlaybackNotificationPress,
 } from '../services/musicMapNotificationService';
+import {
+  DEFAULT_MUSIC_MAP_TRACK_DURATION_MS,
+  normalizeMusicMapDurationMs,
+} from '../services/musicMapDuration';
 import { getCurrentWeather, isWeatherConfigured } from '../services/weatherService';
 import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
 
@@ -62,19 +73,19 @@ const LOCATION_STATE_MIN_DISTANCE_M = 5;
 const LOCATION_STATE_MIN_INTERVAL_MS = 10000;
 const MUSIC_MAP_STATIONARY_POLL_INTERVAL_MS = 12000;
 
-function isAutoPlayPreparedState(state = {}) {
-  const playbackStatus = String(state?.playbackStatus || state?.status || '').trim();
-  return Boolean(
-    state &&
-    state.provider === 'spotify' &&
-    state.available !== false &&
-    ['openedSpotify', 'playing', 'preparingAutoPlay'].includes(playbackStatus)
-  );
-}
-
 function hasSpotifyPlaybackUri(track = {}) {
   const uri = String(track?.spotifyUri || track?.uri || track?.spotifyUrl || track?.spotifyStartUrl || track?.spotifyPlaylistUrl || '').trim();
   return uri.startsWith('spotify:') || uri.startsWith('https://open.spotify.com/');
+}
+
+function getMusicMapTrackDurationMs(track = {}) {
+  return normalizeMusicMapDurationMs(track?.durationMs, DEFAULT_MUSIC_MAP_TRACK_DURATION_MS);
+}
+
+function getMusicMapPlaylistDurationMs(tracks = []) {
+  return (Array.isArray(tracks) ? tracks : [])
+    .filter(Boolean)
+    .reduce((total, track) => total + getMusicMapTrackDurationMs(track), 0);
 }
 
 function serializeError(error) {
@@ -241,19 +252,15 @@ async function tryBackgroundAutoPlay(place, source) {
     return;
   }
 
-  try {
-    const playbackTarget = await resolveAutoPlayPlaybackTarget(target);
-    const trackToPlay = playbackTarget?.track || target;
-    const queueToPlay = playbackTarget?.queue?.length ? playbackTarget.queue : [trackToPlay];
-    if (!hasSpotifyPlaybackUri(trackToPlay)) {
-      throw new Error('자동재생할 Spotify URI가 없습니다.');
-    }
-    await musicPlayerService.playInBackground(trackToPlay, queueToPlay);
-    await markAutoPlayTriggered(place.id);
-  } catch (error) {
-    await writeAutoPlayModeEnabled(false).catch(() => {});
-    await writePendingAutoPlay(place, source);
+  const playbackTarget = await resolveAutoPlayPlaybackTarget(target).catch(() => null);
+  const trackToPlay = playbackTarget?.track || target;
+  if (!hasSpotifyPlaybackUri(trackToPlay)) {
+    return;
   }
+
+  await writePendingAutoPlay(place, source).catch(() => null);
+  await scheduleAutoPlayNotification(place, { source });
+  await markAutoPlayTriggered(place.id);
 }
 
 async function tryBackgroundMusicMapRecord(coords) {
@@ -351,12 +358,12 @@ export function LocationProvider({ children }) {
   const [lastWeatherFetchedAt, setLastWeatherFetchedAt] = useState(0);
   const autoPlayPlacesRef = useRef({ places: [], fetchedAt: 0 });
   const autoPlayInFlightRef = useRef(false);
-  const autoPlayColdStartOffAppliedRef = useRef(false);
   const autoPlayModeEnabledRef = useRef(false);
   const autoPlayBackgroundEnsureInFlightRef = useRef(false);
   const hasBackgroundPermissionRef = useRef(false);
   const musicMapActionTokenRef = useRef(0);
   const musicMapStopRequestedRef = useRef(false);
+  const musicMapCompletionTimerRef = useRef(null);
   const playerRef = useRef(player);
   const locationRef = useRef(null);
   const lastLocationPublishedAtRef = useRef(0);
@@ -436,6 +443,22 @@ export function LocationProvider({ children }) {
         musicMapRecordingSignatureRef.current = nextSignature;
         setMusicMapRecording(nextSession);
       }
+    }
+    if (result?.stopped) {
+      const stoppedSession = {
+        isActive: false,
+        elapsedMs: 0,
+        maxDurationMs: 60 * 60 * 1000,
+        ...result.stopped,
+        isActive: false,
+      };
+      musicMapStopRequestedRef.current = true;
+      musicMapActionTokenRef.current += 1;
+      stopMusicMapTrackPlaylistPlayback('music-map');
+      cancelMusicMapSequentialPlaybackNotifications('music-map').catch(() => {});
+      musicMapRecordingRef.current = stoppedSession;
+      musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(stoppedSession);
+      setMusicMapRecording(stoppedSession);
     }
     return result;
   }, []);
@@ -571,8 +594,12 @@ export function LocationProvider({ children }) {
     return places;
   }, [refreshAutoPlayPlaces, syncGeofenceRegions]);
 
-  const executeAutoPlay = useCallback(async (place, source = 'foreground', coords = null) => {
-    if (!autoPlayModeEnabledRef.current || !hasBackgroundPermissionRef.current || !place || autoPlayInFlightRef.current) {
+  const notifyAutoPlayArrival = useCallback(async (place, source = 'foreground') => {
+    if (
+      !autoPlayModeEnabledRef.current ||
+      !place ||
+      autoPlayInFlightRef.current
+    ) {
       return null;
     }
 
@@ -582,6 +609,42 @@ export function LocationProvider({ children }) {
     }
 
     autoPlayInFlightRef.current = true;
+    setAutoPlayStatus({ status: 'notifying', place, error: null });
+
+    try {
+      const playbackTarget = await resolveAutoPlayPlaybackTarget(target);
+      const trackToPlay = playbackTarget?.track || target;
+      if (!hasSpotifyPlaybackUri(trackToPlay)) {
+        throw new Error('알림으로 재생할 Spotify URI가 없습니다.');
+      }
+
+      await writePendingAutoPlay(place, source).catch(() => null);
+      await scheduleAutoPlayNotification(place, { source, delayMs: 1000 });
+      await markAutoPlayTriggered(place.id);
+      setAutoPlayStatus({ status: 'notificationScheduled', place, error: null });
+
+      return place;
+    } catch (error) {
+      await writePendingAutoPlay(place, source).catch(() => null);
+      setAutoPlayStatus({ status: 'error', place, error: error.message || '장소 도착 알림을 띄우는 데 실패했습니다.' });
+      return null;
+    } finally {
+      autoPlayInFlightRef.current = false;
+    }
+  }, []);
+
+  const playAutoPlayNotificationPlace = useCallback(async (place, source = 'autoplay-notification', coords = null) => {
+    if (!place || autoPlayInFlightRef.current) {
+      return null;
+    }
+
+    const target = getSavedPlacePlayTarget(place);
+    if (!target) {
+      return null;
+    }
+
+    autoPlayInFlightRef.current = true;
+    const notificationSource = String(source || 'autoplay-notification');
     setAutoPlayStatus({ status: 'loading', place, error: null });
 
     try {
@@ -592,20 +655,25 @@ export function LocationProvider({ children }) {
         const nextTrackToPlay = nextTrack || trackToPlay;
         const nextQueueToPlay = nextQueue?.length ? nextQueue : [nextTrackToPlay];
         if (!hasSpotifyPlaybackUri(nextTrackToPlay)) {
-          throw new Error('자동재생할 Spotify URI가 없습니다.');
+          throw new Error('알림으로 재생할 Spotify URI가 없습니다.');
         }
 
         let playbackState;
-        if (playerRef.current?.playInBackground) {
-          playbackState = await playerRef.current.playInBackground(nextTrackToPlay, nextQueueToPlay);
-        } else {
-          playbackState = await musicPlayerService.playInBackground(nextTrackToPlay, nextQueueToPlay);
+        try {
+          if (playerRef.current?.playInBackground) {
+            playbackState = await playerRef.current.playInBackground(nextTrackToPlay, nextQueueToPlay);
+          } else {
+            playbackState = await musicPlayerService.playInBackground(nextTrackToPlay, nextQueueToPlay);
+          }
+        } catch {
+          const openSpotify = playerRef.current?.openInSpotify || musicPlayerService.openInSpotify;
+          playbackState = await openSpotify(nextTrackToPlay, nextQueueToPlay);
         }
 
         recordListeningEvent({
           userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
           track: nextTrackToPlay,
-          source: queueToPlay.length > 1 ? 'autoplay-playlist' : 'autoplay',
+          source: queueToPlay.length > 1 ? `${notificationSource}-playlist` : notificationSource,
           recommendationSlot: 'place-autoplay',
           context: buildListeningContext({
             location: coords || locationRef.current,
@@ -640,21 +708,19 @@ export function LocationProvider({ children }) {
           setAutoPlayStatus({
             status: 'error',
             place,
-            error: nextError?.message || '자동재생 플레이리스트 다음 곡 재생에 실패했습니다.',
+            error: nextError?.message || '알림으로 연 자동재생 플레이리스트 다음 곡 재생에 실패했습니다.',
           });
         },
         () => {},
         'autoplay'
       );
       await markAutoPlayTriggered(place.id);
+      cancelAutoPlayNotifications(place.id).catch(() => null);
       setAutoPlayStatus({ status: 'playing', place, error: null });
 
       return place;
     } catch (error) {
-      await writeAutoPlayModeEnabled(false).catch(() => {});
-      autoPlayModeEnabledRef.current = false;
-      setAutoPlayModeEnabledState(false);
-      setAutoPlayStatus({ status: 'error', place, error: error.message || '자동재생에 실패했습니다.' });
+      setAutoPlayStatus({ status: 'error', place, error: error.message || '알림으로 지정한 노래를 재생하지 못했습니다.' });
       return null;
     } finally {
       autoPlayInFlightRef.current = false;
@@ -669,9 +735,9 @@ export function LocationProvider({ children }) {
     const places = await refreshAutoPlayPlaces();
     const candidate = await findAutoPlayCandidate(coords, places);
     if (candidate) {
-      await executeAutoPlay(candidate, source, coords);
+      await notifyAutoPlayArrival(candidate, source, coords);
     }
-  }, [executeAutoPlay, refreshAutoPlayPlaces]);
+  }, [notifyAutoPlayArrival, refreshAutoPlayPlaces]);
 
   const refreshPermissions = useCallback(async () => {
     const foreground = await Location.getForegroundPermissionsAsync();
@@ -932,6 +998,7 @@ export function LocationProvider({ children }) {
   const setAutoPlayModeEnabled = useCallback(async (enabled) => {
     if (!enabled) {
       await writeAutoPlayModeEnabled(false);
+      await cancelAutoPlayNotifications().catch(() => null);
       autoPlayModeEnabledRef.current = false;
       setAutoPlayModeEnabledState(false);
       return false;
@@ -964,27 +1031,30 @@ export function LocationProvider({ children }) {
       await setAutoPlayModeEnabled(false);
       throw new Error('AUTO ON을 준비하려면 먼저 자동재생 장소와 재생할 Spotify 곡을 저장해주세요.');
     }
-    if (!hasSpotifyPlaybackUri(primerTarget)) {
+    const primerPlaybackTarget = await resolveAutoPlayPlaybackTarget(primerTarget);
+    const primerTrack = primerPlaybackTarget?.track || primerTarget;
+    if (!hasSpotifyPlaybackUri(primerTrack)) {
       await setAutoPlayModeEnabled(false);
       throw new Error('AUTO ON을 준비하려면 Spotify URI가 저장된 자동재생 곡이 필요합니다.');
     }
 
-    const state = await playerRef.current?.prepareAutoPlay?.(primerTarget);
-    if (!isAutoPlayPreparedState(state)) {
-      await setAutoPlayModeEnabled(false);
-      throw new Error('Spotify 실행 상태를 확인하지 못했습니다. AUTO는 OFF로 유지합니다.');
-    }
-
+    await requestAutoPlayNotificationPermission().catch(() => null);
     const enabled = await setAutoPlayModeEnabled(true);
     if (!enabled) {
       throw new Error('백그라운드 위치 권한이 없어 AUTO를 켤 수 없습니다.');
     }
-    return state;
+    return {
+      provider: 'spotify',
+      available: true,
+      playbackStatus: 'notificationReady',
+      currentTrack: primerTrack,
+    };
   }, [refreshAutoPlayPlaces, setAutoPlayModeEnabled]);
 
   const forceAutoPlayOff = useCallback(async () => {
     await writeAutoPlayModeEnabled(false);
     await AsyncStorage.setItem(BACKGROUND_TRACKING_KEY, 'false');
+    await cancelAutoPlayNotifications().catch(() => null);
     autoPlayModeEnabledRef.current = false;
     setAutoPlayModeEnabledState(false);
     setBackgroundTrackingEnabled(false);
@@ -1036,33 +1106,96 @@ export function LocationProvider({ children }) {
     return true;
   }, [recordMusicMapPlaybackNow]);
 
+  const handleAutoPlayNotificationUrl = useCallback(async (url = '') => {
+    const payload = await consumeAutoPlayNotificationUrl(url);
+    const fallbackPlaceId = payload?.place ? '' : getAutoPlayNotificationPlaceId(url);
+    const fallbackPlaces = fallbackPlaceId ? await refreshAutoPlayPlaces({ force: true }).catch(() => readCachedAutoPlayPlaces()) : [];
+    const fallbackPlace = fallbackPlaces.find((place) => String(place.id) === String(fallbackPlaceId));
+    const place = payload?.place || fallbackPlace;
+    if (!place) {
+      return false;
+    }
+
+    if (!autoPlayModeEnabledRef.current) {
+      await writeAutoPlayModeEnabled(true).catch(() => null);
+      autoPlayModeEnabledRef.current = true;
+      setAutoPlayModeEnabledState(true);
+    }
+
+    const permissions = await refreshPermissions().catch(() => null);
+    if (permissions?.hasBackgroundPermission && Platform.OS !== 'web') {
+      startBackgroundTracking({ syncPlaces: true, musicMapOnly: false }).catch(() => null);
+    }
+
+    await playAutoPlayNotificationPlace(
+      place,
+      payload.source || 'autoplay-notification',
+      locationRef.current
+    );
+    return true;
+  }, [playAutoPlayNotificationPlace, refreshAutoPlayPlaces, refreshPermissions, startBackgroundTracking]);
+
+  const clearMusicMapCompletionTimer = useCallback(() => {
+    if (musicMapCompletionTimerRef.current) {
+      clearTimeout(musicMapCompletionTimerRef.current);
+      musicMapCompletionTimerRef.current = null;
+    }
+  }, []);
+
+  const completeMusicMapRecording = useCallback(async () => {
+    musicMapStopRequestedRef.current = true;
+    musicMapActionTokenRef.current += 1;
+    clearMusicMapCompletionTimer();
+    stopMusicMapTrackPlaylistPlayback('music-map');
+    await cancelMusicMapSequentialPlaybackNotifications('music-map').catch(() => {});
+
+    const stopped = await stopMusicMapRecordingSession().catch(() => null);
+    const stoppedState = stopped || {
+      isActive: false,
+      elapsedMs: 0,
+      maxDurationMs: 60 * 60 * 1000,
+    };
+    const nextStoppedState = {
+      ...stoppedState,
+      isActive: false,
+    };
+    musicMapRecordingRef.current = nextStoppedState;
+    musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(nextStoppedState);
+    setMusicMapRecording(nextStoppedState);
+    return nextStoppedState;
+  }, [clearMusicMapCompletionTimer]);
+
   useEffect(() => {
-    let mounted = true;
     const handleUrl = (url) => {
       if (!url) {
         return;
       }
-      handleMusicMapPlaybackNotificationUrl(url).catch((error) => {
-        if (mounted) {
-          setLocationError(error?.message || 'Spotify에서 다음 곡을 여는 데 실패했어요.');
-        }
-      });
+      Promise.resolve()
+        .then(async () => {
+          const handledAutoPlay = await handleAutoPlayNotificationUrl(url);
+          if (handledAutoPlay) {
+            return true;
+          }
+          return handleMusicMapPlaybackNotificationUrl(url);
+        })
+        .catch(() => {});
     };
 
     const linkingSubscription = Linking.addEventListener('url', (event) => {
       handleUrl(event.url);
     });
     const notificationSubscription = subscribeMusicMapPlaybackNotificationPress(handleUrl);
-    getInitialMusicMapPlaybackNotificationUrl()
+    const autoPlayNotificationSubscription = subscribeAutoPlayNotificationPress(handleUrl);
+    getInitialPlaybackNotificationUrl()
       .then(handleUrl)
       .catch(() => null);
 
     return () => {
-      mounted = false;
       linkingSubscription.remove();
       notificationSubscription.remove();
+      autoPlayNotificationSubscription.remove();
     };
-  }, [handleMusicMapPlaybackNotificationUrl]);
+  }, [handleAutoPlayNotificationUrl, handleMusicMapPlaybackNotificationUrl]);
 
   const startMusicMapRecording = useCallback(async ({
     trackPlaylist = [],
@@ -1072,6 +1205,7 @@ export function LocationProvider({ children }) {
     const actionToken = musicMapActionTokenRef.current + 1;
     musicMapActionTokenRef.current = actionToken;
     musicMapStopRequestedRef.current = false;
+    clearMusicMapCompletionTimer();
 
     const playlistTracks = Array.isArray(trackPlaylist) ? trackPlaylist.filter(Boolean) : [];
     const mode = Object.values(MUSIC_MAP_RECORDING_MODES).includes(recordingMode)
@@ -1103,9 +1237,16 @@ export function LocationProvider({ children }) {
       } else {
         initialPlaybackState = await musicPlayerService.getState().catch(() => null);
       }
+      const playbackStatus = String(initialPlaybackState?.playbackStatus || initialPlaybackState?.status || '').trim();
+      const cannotReadPlaybackState = !initialPlaybackState ||
+        !initialPlaybackState.isAuthorized ||
+        ['notDetermined', 'unknown', 'playbackAccessDenied', 'playbackStateUnavailable'].includes(playbackStatus);
+      if (cannotReadPlaybackState) {
+        throw new Error('심사용 계정 인증이 아직 반영되지 않았습니다. 10~20분 후에 다시 시도해주세요.');
+      }
       initialTrack = initialPlaybackState?.currentTrack || null;
-      if (!initialTrack) {
-        throw new Error('아직 고급모드 권한 요청이 허용되지 않았습니다. \n 1~20분 후에 다시 시도해주세요.');
+      if (!initialPlaybackState.isPlaying || !initialTrack) {
+        throw new Error('Spotify에서 노래를 재생 중일 때만 고급모드 기록을 시작할 수 있습니다. Spotify 앱에서 노래를 하나 재생한 뒤 다시 기록을 눌러주세요.');
       }
     }
 
@@ -1135,22 +1276,29 @@ export function LocationProvider({ children }) {
     setMusicMapRecording(session);
 
     if (mode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL) {
+      const totalPlaylistDurationMs = getMusicMapPlaylistDurationMs(playlistTracks);
+      if (totalPlaylistDurationMs > 0) {
+        musicMapCompletionTimerRef.current = setTimeout(() => {
+          if (
+            musicMapActionTokenRef.current === actionToken &&
+            musicMapRecordingRef.current?.isActive &&
+            (musicMapRecordingRef.current.recordingMode || MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL) === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL
+          ) {
+            completeMusicMapRecording().catch(() => {});
+          }
+        }, totalPlaylistDurationMs);
+      }
+
       const playSequentialTrack = async (nextTrack, nextQueue = []) => {
         const nextTrackToPlay = nextTrack || playlistTracks[0];
         const nextQueueToPlay = nextQueue?.length ? nextQueue : [nextTrackToPlay];
         if (!hasSpotifyPlaybackUri(nextTrackToPlay)) {
           throw new Error('Spotify에서 다음 곡을 여는 데 실패했어요.');
         }
-        const openSpotify = playerRef.current?.openInSpotify || musicPlayerService.openInSpotify;
-        const trackWithoutContext = { ...nextTrackToPlay, spotifyContextUri: '', contextUri: '' };
-        const queueWithoutContext = nextQueueToPlay.map((queuedTrack) => ({
-          ...queuedTrack,
-          spotifyContextUri: '',
-          contextUri: '',
-        }));
+        const playSpotify = playerRef.current?.play || musicPlayerService.play;
         let playbackState;
         try {
-          playbackState = await openSpotify(trackWithoutContext, queueWithoutContext);
+          playbackState = await playSpotify(nextTrackToPlay, nextQueueToPlay);
         } catch (error) {
           throw new Error('Spotify에서 다음 곡을 여는 데 실패했어요.');
         }
@@ -1162,21 +1310,11 @@ export function LocationProvider({ children }) {
         await startMusicMapTrackPlaylistPlayback(
           playlistTracks,
           playSequentialTrack,
-          (nextError) => {
-            setLocationError(nextError?.message || 'Spotify에서 다음 곡을 여는 데 실패했어요.');
+          () => {
+            completeMusicMapRecording().catch(() => {});
           },
-          async () => {
-            stopMusicMapTrackPlaylistPlayback('music-map');
-            cancelMusicMapSequentialPlaybackNotifications('music-map').catch(() => {});
-            const stopped = await stopMusicMapRecordingSession().catch(() => null);
-            const stoppedState = stopped || {
-              isActive: false,
-              elapsedMs: 0,
-              maxDurationMs: 60 * 60 * 1000,
-            };
-            musicMapRecordingRef.current = stoppedState;
-            musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(stoppedState);
-            setMusicMapRecording(stoppedState);
+          () => {
+            completeMusicMapRecording().catch(() => {});
           },
           'music-map'
         );
@@ -1212,36 +1350,10 @@ export function LocationProvider({ children }) {
     }
 
     return session;
-  }, [authUser?.isAnonymous, authUser?.uid, recordMusicMapPlaybackAndSync, recordMusicMapPlaybackNow, startBackgroundTracking]);
+  }, [authUser?.isAnonymous, authUser?.uid, clearMusicMapCompletionTimer, completeMusicMapRecording, recordMusicMapPlaybackAndSync, recordMusicMapPlaybackNow, startBackgroundTracking]);
 
   const stopMusicMapRecording = useCallback(async () => {
-    musicMapStopRequestedRef.current = true;
-    musicMapActionTokenRef.current += 1;
-    stopMusicMapTrackPlaylistPlayback('music-map');
-    cancelMusicMapSequentialPlaybackNotifications('music-map').catch(() => {});
-    const stoppedState = {
-      isActive: false,
-      elapsedMs: 0,
-      maxDurationMs: 60 * 60 * 1000,
-    };
-    musicMapRecordingRef.current = stoppedState;
-    musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(stoppedState);
-    setMusicMapRecording(stoppedState);
-
-    let savedSession = stoppedState;
-    try {
-      savedSession = await stopMusicMapRecordingSession();
-      const nextStoppedState = {
-        ...stoppedState,
-        ...savedSession,
-        isActive: false,
-      };
-      musicMapRecordingRef.current = nextStoppedState;
-      musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(nextStoppedState);
-      setMusicMapRecording(nextStoppedState);
-    } catch (error) {
-      setLocationError(serializeError(error));
-    }
+    const savedSession = await completeMusicMapRecording();
 
     readAutoPlayModeEnabled()
       .then((autoPlayEnabled) => {
@@ -1252,17 +1364,14 @@ export function LocationProvider({ children }) {
       })
       .catch(() => {});
 
-    return {
-      ...stoppedState,
-      ...savedSession,
-      isActive: false,
-    };
-  }, [stopBackgroundTracking]);
+    return savedSession;
+  }, [completeMusicMapRecording, stopBackgroundTracking]);
 
   useEffect(() => {
     const subscription = musicPlayerService.subscribeScreenState?.((event = {}) => {
       const screenState = String(event.state || '').toLowerCase();
-      if (!['off', 'locked'].includes(screenState)) {
+      const isScreenOff = event.isScreenOn === false || ['off', 'locked'].includes(screenState);
+      if (!isScreenOff) {
         return;
       }
 
@@ -1272,21 +1381,8 @@ export function LocationProvider({ children }) {
         return;
       }
 
-      const trackPlaylist = Array.isArray(activeSession.trackPlaylist) ? activeSession.trackPlaylist : [];
-      const recordingStartedAtMs = new Date(activeSession.recordingStartedAt || activeSession.startedAt || Date.now()).getTime();
-      const elapsedMs = Number.isFinite(recordingStartedAtMs) ? Math.max(0, Date.now() - recordingStartedAtMs) : 0;
-
       stopMusicMapRecording()
-        .then(() => {
-          scheduleMusicMapSequentialPlaybackNotifications(trackPlaylist, {
-            channel: 'music-map',
-            elapsedMs,
-          }).catch(() => {});
-          setLocationError('화면이 꺼져 일반모드 뮤직지도 기록이 중단됐습니다.');
-        })
-        .catch((error) => {
-          setLocationError(serializeError(error));
-        });
+        .catch(() => {});
     });
 
     return () => subscription?.remove?.();
@@ -1324,18 +1420,29 @@ export function LocationProvider({ children }) {
       musicMapRecordingRef.current = savedMusicMapSession;
       musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(savedMusicMapSession);
       setMusicMapRecording(savedMusicMapSession);
-      if (!autoPlayColdStartOffAppliedRef.current) {
-        autoPlayColdStartOffAppliedRef.current = true;
-        await writeAutoPlayModeEnabled(false);
-        autoPlayModeEnabledRef.current = false;
-        setAutoPlayModeEnabledState(false);
+      const savedAutoPlayEnabled = await readAutoPlayModeEnabled().catch(() => false);
+      const shouldRestoreAutoPlay = Boolean(savedAutoPlayEnabled && permissions.hasBackgroundPermission);
+      if (savedAutoPlayEnabled && !permissions.hasBackgroundPermission) {
+        await writeAutoPlayModeEnabled(false).catch(() => null);
       }
+      autoPlayModeEnabledRef.current = shouldRestoreAutoPlay;
+      setAutoPlayModeEnabledState(shouldRestoreAutoPlay);
 
       if (Platform.OS !== 'web') {
         let isRegistered = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
         if (!hasAlwaysPermission && isRegistered) {
           await stopBackgroundTracking();
           isRegistered = false;
+        } else if (
+          hasAlwaysPermission &&
+          shouldRestoreAutoPlay &&
+          !isRegistered
+        ) {
+          await startBackgroundTracking({
+            syncPlaces: true,
+            musicMapOnly: false,
+          });
+          isRegistered = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
         } else if (
           hasAlwaysPermission &&
           savedMusicMapSession.isActive &&
@@ -1420,11 +1527,6 @@ export function LocationProvider({ children }) {
         }
       }
 
-      const pendingAutoPlay = await consumePendingAutoPlay();
-      if (!shouldDisableAutoPlay && autoPlayModeEnabledRef.current && pendingAutoPlay?.place) {
-        await executeAutoPlay(pendingAutoPlay.place, pendingAutoPlay.source || 'app-active', cached?.coords || locationRef.current);
-      }
-
     });
 
     return () => {
@@ -1433,7 +1535,6 @@ export function LocationProvider({ children }) {
     };
   }, [
     evaluateAutoPlay,
-    executeAutoPlay,
     forceAutoPlayOff,
     publishLocationState,
     recordMusicMapPlaybackAndSync,

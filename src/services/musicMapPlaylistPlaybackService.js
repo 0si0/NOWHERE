@@ -1,6 +1,6 @@
+import { DEFAULT_MUSIC_MAP_TRACK_DURATION_MS, normalizeMusicMapDurationMs } from './musicMapDuration';
+
 const MAX_TRACK_PLAYLIST_ITEMS = 10;
-const MIN_TRACK_DURATION_MS = 30000;
-const DEFAULT_TRACK_DURATION_MS = 180000;
 
 const playbackControllers = new Map();
 
@@ -12,10 +12,7 @@ function getController(channel = 'music-map') {
 }
 
 function getTrackDurationMs(track = {}) {
-  const durationMs = Number(track.durationMs || 0);
-  return Number.isFinite(durationMs) && durationMs > 0
-    ? Math.max(MIN_TRACK_DURATION_MS, durationMs)
-    : DEFAULT_TRACK_DURATION_MS;
+  return normalizeMusicMapDurationMs(track.durationMs, DEFAULT_MUSIC_MAP_TRACK_DURATION_MS);
 }
 
 function getPlayableTracks(tracks = []) {

@@ -341,7 +341,6 @@ export default function HomeScreen({ navigation }) {
     foregroundPermission,
     autoPlayModeEnabled,
     setAutoPlayModeEnabled,
-    prepareAutoPlayMode,
     requestPermissions,
   } = useContext(LocationContext);
   const { authUser } = useSession();
@@ -548,28 +547,27 @@ export default function HomeScreen({ navigation }) {
     weather,
   ]);
 
-  const ensureSpotifyRunningAndRefresh = useCallback(async ({
-    enableAutoPlayMode = false,
-    showLoading = true,
-  } = {}) => {
+  const enableLocationBackgroundMode = useCallback(async () => {
     if (spotifyEnsureInFlightRef.current) {
       return;
     }
 
     spotifyEnsureInFlightRef.current = true;
     try {
-      if (enableAutoPlayMode) {
-        await prepareAutoPlayMode();
+      const permissions = await requestPermissions?.();
+      if (!permissions?.hasForegroundPermission || !permissions?.hasBackgroundPermission) {
+        throw new Error('백그라운드 위치 권한을 허용해야 위치 ON을 사용할 수 있습니다.');
       }
-
-      await clearRecommendationCache();
-      await refreshRecommendations({ force: true, showLoading, refreshSeed: Date.now() });
+      const enabled = await setAutoPlayModeEnabled(true);
+      if (!enabled) {
+        throw new Error('백그라운드 위치 권한을 확인하지 못했습니다.');
+      }
     } finally {
       spotifyEnsureInFlightRef.current = false;
     }
   }, [
-    prepareAutoPlayMode,
-    refreshRecommendations,
+    requestPermissions,
+    setAutoPlayModeEnabled,
   ]);
 
   useEffect(() => {
@@ -728,13 +726,13 @@ export default function HomeScreen({ navigation }) {
   const handleToggleAutoPlayMode = () => {
     if (isAutoPlayVisibleOn) {
       setAutoPlayModeEnabled(false).catch((error) => {
-        Alert.alert('자동재생 설정 실패', error.message || '자동재생 모드를 끄지 못했습니다.');
+        Alert.alert('위치 설정 실패', error.message || '위치 모드를 끄지 못했습니다.');
       });
       return;
     }
 
-    ensureSpotifyRunningAndRefresh({ enableAutoPlayMode: true, showLoading: true }).catch((error) => {
-      Alert.alert('자동재생 설정 실패', getSpotifyActionMessage(error, 'Spotify 실행 또는 자동재생 설정에 실패했습니다.'));
+    enableLocationBackgroundMode().catch((error) => {
+      Alert.alert('위치 권한 필요', error.message || '백그라운드 위치 권한을 허용해주세요.');
     });
   };
 
@@ -790,7 +788,7 @@ export default function HomeScreen({ navigation }) {
               >
                 <View style={[styles.autoPlayDot, isAutoPlayVisibleOn && styles.autoPlayDotActive]} />
                 <Text style={[styles.autoPlayToggleText, isAutoPlayVisibleOn && styles.autoPlayToggleTextActive]}>
-                  {isAutoPlayVisibleOn ? 'AUTO ON' : 'AUTO OFF'}
+                  {isAutoPlayVisibleOn ? '위치 ON' : '위치 OFF'}
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity

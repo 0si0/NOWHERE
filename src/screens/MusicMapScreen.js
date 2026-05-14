@@ -19,6 +19,7 @@ import { LocationContext } from '../contexts/LocationContext';
 import { useSession } from '../contexts/SessionContext';
 import { API_KEYS, COLORS } from '../constants';
 import {
+  deleteMusicMapRecords,
   getMusicMapRecords,
   getOrCreateAppUserId,
 } from '../services/firebaseService';
@@ -35,6 +36,7 @@ import {
 } from '../services/musicMapPlaylistService';
 import { MUSIC_MAP_RECORDING_MODES } from '../services/musicMapRecordingService';
 import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
+import { setMusicDiaryDraft } from '../services/musicDiaryDraftService';
 
 const UI = {
   bg: '#05070A',
@@ -687,6 +689,7 @@ export default function MusicMapScreen({ navigation }) {
   const [isSearchingTracks, setIsSearchingTracks] = useState(false);
   const [isImportingSpotifyPlaylist, setIsImportingSpotifyPlaylist] = useState(false);
   const [isLoadingTrendingTracks, setIsLoadingTrendingTracks] = useState(false);
+  const [isDeletingRecord, setIsDeletingRecord] = useState(false);
   const loadRecordsInFlightRef = useRef(null);
   const startActionInFlightRef = useRef(false);
   const stopActionInFlightRef = useRef(false);
@@ -1189,8 +1192,16 @@ export default function MusicMapScreen({ navigation }) {
       setRecordingElapsedMs(0);
       const message = nextError.message || '뮤직지도 기록 상태를 변경하지 못했습니다.';
       setError(message);
+      const isNoSpotifyPlayback = modeToStart === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING &&
+        message.includes('노래를 재생 중일 때만');
+      const isSpotifyReviewAuthPending = modeToStart === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING &&
+        message.includes('심사용 계정 인증');
       Alert.alert(
-        modeToStart === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING ? '고급모드 사용불가' : '뮤직지도 기록 실패',
+        isSpotifyReviewAuthPending
+          ? '고급모드 인증 대기'
+          : isNoSpotifyPlayback
+          ? 'Spotify 재생 필요'
+          : modeToStart === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING ? '고급모드 기록 실패' : '뮤직지도 기록 실패',
         message
       );
     } finally {
@@ -1236,6 +1247,59 @@ export default function MusicMapScreen({ navigation }) {
       setError(getSpotifyPlaybackMessage(nextError));
     });
   }, [authUser?.isAnonymous, authUser?.uid, currentPlaceName, location, player, weather]);
+
+  const handleDeleteSelectedRecord = useCallback(() => {
+    if (!selectedRecord || effectiveIsRecording || isDeletingRecord) {
+      return;
+    }
+    const recordIds = (selectedRecord.records || [])
+      .map((record) => record.id)
+      .filter(Boolean);
+    if (!recordIds.length) {
+      return;
+    }
+
+    Alert.alert(
+      '기록 삭제',
+      '선택한 뮤직지도 기록을 삭제할까요?',
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '삭제',
+          style: 'destructive',
+          onPress: async () => {
+            setIsDeletingRecord(true);
+            setError('');
+            try {
+              const ownerId = authUser?.uid && !authUser.isAnonymous
+                ? authUser.uid
+                : await getOrCreateAppUserId();
+              await deleteMusicMapRecords(ownerId, recordIds);
+              setRecords((previousRecords) => previousRecords.filter((record) => !recordIds.includes(record.id)));
+              setSelectedRecordId('');
+              await loadRecords({ refreshing: true, force: true });
+            } catch (nextError) {
+              const message = nextError.message || '뮤직지도 기록 삭제에 실패했습니다.';
+              setError(message);
+              Alert.alert('삭제 실패', message);
+            } finally {
+              setIsDeletingRecord(false);
+            }
+          },
+        },
+      ]
+    );
+  }, [authUser?.isAnonymous, authUser?.uid, effectiveIsRecording, isDeletingRecord, loadRecords, selectedRecord]);
+
+  const handleOpenMusicDiary = useCallback(() => {
+    if (!selectedRecord || effectiveIsRecording) {
+      return;
+    }
+    const draftId = setMusicDiaryDraft(selectedRecord, selectedRecord.tracks?.[0] || null);
+    navigation.navigate('MusicDiary', {
+      draftId,
+    });
+  }, [effectiveIsRecording, navigation, selectedRecord]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -1487,7 +1551,32 @@ export default function MusicMapScreen({ navigation }) {
 
               {!effectiveIsRecording && selectedRecord ? (
                 <View style={styles.selectedDetailsPanel}>
-                  <Text style={styles.selectedOverlayLabel}>이 기록에 포함된 노래</Text>
+                  <View style={styles.selectedDetailsHeader}>
+                    <Text style={styles.selectedOverlayLabel}>이 기록에 포함된 노래</Text>
+                    <View style={styles.selectedHeaderActions}>
+                      <TouchableOpacity
+                        style={styles.selectedDiaryButton}
+                        onPress={handleOpenMusicDiary}
+                        activeOpacity={0.86}
+                      >
+                        <Ionicons name="journal-outline" size={14} color={UI.peach} />
+                        <Text style={styles.selectedDiaryText}>다이어리</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.selectedDeleteButton, isDeletingRecord && styles.selectedDeleteButtonDisabled]}
+                        onPress={handleDeleteSelectedRecord}
+                        disabled={isDeletingRecord}
+                        activeOpacity={0.86}
+                      >
+                        {isDeletingRecord ? (
+                          <ActivityIndicator color={UI.peach} size="small" />
+                        ) : (
+                          <Ionicons name="trash-outline" size={14} color={UI.peach} />
+                        )}
+                        <Text style={styles.selectedDeleteText}>삭제</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
                   <ScrollView
                     style={styles.selectedTrackList}
                     nestedScrollEnabled
@@ -2131,7 +2220,54 @@ const styles = StyleSheet.create({
     color: UI.text,
     fontSize: 12,
     fontWeight: '900',
+  },
+  selectedDetailsHeader: {
+    minHeight: 32,
     marginBottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  selectedHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+  },
+  selectedDiaryButton: {
+    minHeight: 30,
+    paddingHorizontal: 10,
+    borderRadius: 15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255, 201, 184, 0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.34)',
+  },
+  selectedDiaryText: {
+    color: UI.peach,
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  selectedDeleteButton: {
+    minHeight: 30,
+    paddingHorizontal: 10,
+    borderRadius: 15,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255, 201, 184, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.20)',
+  },
+  selectedDeleteButtonDisabled: {
+    opacity: 0.55,
+  },
+  selectedDeleteText: {
+    color: UI.peach,
+    fontSize: 11,
+    fontWeight: '900',
   },
   selectedTrackList: {
     maxHeight: 172,

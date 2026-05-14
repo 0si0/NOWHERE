@@ -7,6 +7,7 @@ import {
 } from './albumColorService';
 import { saveMusicMapRecord } from './firebaseService';
 import { getDistanceMeters } from './locationService';
+import { DEFAULT_MUSIC_MAP_TRACK_DURATION_MS, normalizeMusicMapDurationMs } from './musicMapDuration';
 
 const MUSIC_MAP_SESSION_KEY = '@nowhere/music-map-recording-session-v2';
 const MUSIC_MAP_STOPPING_KEY = '@nowhere/music-map-recording-stopping-v2';
@@ -23,8 +24,7 @@ const MAX_RECORDING_DURATION_MS = 60 * 60 * 1000;
 const MIN_SAVED_ROUTE_POINTS = 1;
 const SPOTIFY_STATE_MAX_CACHE_AGE_MS = 10 * 60 * 1000;
 const SESSION_IDLE_WRITE_INTERVAL_MS = 15000;
-const DEFAULT_TRACK_DURATION_MS = 180000;
-const MIN_TRACK_DURATION_MS = 30000;
+const DEFAULT_TRACK_DURATION_MS = DEFAULT_MUSIC_MAP_TRACK_DURATION_MS;
 const MAX_TRACK_PLAYLIST_ITEMS = 10;
 export const MUSIC_MAP_RECORDING_MODES = {
   SPOTIFY_NOW_PLAYING: 'spotifyNowPlaying',
@@ -88,6 +88,7 @@ function normalizePlaylistTrack(track = {}) {
     return null;
   }
   const albumArtUrl = getAlbumArtUrl(track);
+  const durationMs = normalizeMusicMapDurationMs(track.durationMs, DEFAULT_TRACK_DURATION_MS);
   return {
     type: 'track',
     provider: track.provider || 'spotify',
@@ -103,7 +104,7 @@ function normalizePlaylistTrack(track = {}) {
     spotifyUri: track.spotifyUri || track.uri || '',
     uri: track.spotifyUri || track.uri || '',
     spotifyUrl: track.spotifyUrl || track.externalUrl || '',
-    durationMs: Math.max(MIN_TRACK_DURATION_MS, Number(track.durationMs || 0) || DEFAULT_TRACK_DURATION_MS),
+    durationMs,
   };
 }
 
@@ -128,7 +129,7 @@ function getPlaylistTrackAtElapsed(session = {}, elapsedMs = getElapsedMs(sessio
   let cursorMs = 0;
   for (let index = 0; index < trackPlaylist.length; index += 1) {
     const track = trackPlaylist[index];
-    const durationMs = Math.max(MIN_TRACK_DURATION_MS, Number(track.durationMs || 0) || DEFAULT_TRACK_DURATION_MS);
+    const durationMs = normalizeMusicMapDurationMs(track.durationMs, DEFAULT_TRACK_DURATION_MS);
     if (elapsedMs < cursorMs + durationMs) {
       return {
         track,
@@ -145,7 +146,7 @@ function getPlaylistTrackAtElapsed(session = {}, elapsedMs = getElapsedMs(sessio
 
 function getPlaylistTotalDurationMs(tracks = []) {
   return normalizeTrackPlaylist(tracks).reduce((total, track) => (
-    total + Math.max(MIN_TRACK_DURATION_MS, Number(track.durationMs || 0) || DEFAULT_TRACK_DURATION_MS)
+    total + normalizeMusicMapDurationMs(track.durationMs, DEFAULT_TRACK_DURATION_MS)
   ), 0);
 }
 
@@ -685,6 +686,19 @@ export async function stopMusicMapRecordingSession() {
   const finalSegment = session.currentSegment
     ? { ...session.currentSegment, endedAt, endElapsedMs: finalElapsedMs }
     : null;
+  const pendingSegments = Array.isArray(session.pendingSegments) ? session.pendingSegments : [];
+  const savedPendingRecords = [];
+  for (const pendingSegment of pendingSegments) {
+    const savedPending = await saveSegment(
+      session,
+      pendingSegment,
+      pendingSegment.endedAt || endedAt
+    ).catch(() => null);
+    if (savedPending) {
+      savedPendingRecords.push(savedPending);
+      session.savedSegmentKeys = [...(session.savedSegmentKeys || []), pendingSegment.id].filter(Boolean).slice(-120);
+    }
+  }
   if (finalSegment) {
     session.currentSegment = finalSegment;
     session.routeSegments = upsertRouteSegment(session, finalSegment);
@@ -697,7 +711,8 @@ export async function stopMusicMapRecordingSession() {
     isActive: false,
     maxDurationMs: MAX_RECORDING_DURATION_MS,
     elapsedMs: getElapsedMs(session),
-    savedRecord: saved,
+    savedRecord: saved || savedPendingRecords[0] || null,
+    savedRecords: [...savedPendingRecords, saved].filter(Boolean),
   };
 }
 
@@ -786,11 +801,22 @@ export async function recordCurrentMusicMapPlayback({
     const savedRecords = [];
 
     if (currentSegment?.trackKey && !isSameTrack(currentSegment, track)) {
-      const saved = await saveSegment(session, currentSegment, recordedAt).catch(() => null);
+      const endedSegment = {
+        ...currentSegment,
+        endedAt: recordedAt,
+        endElapsedMs: playlistSnapshot?.startedAtMs ?? elapsedMs,
+      };
+      const saved = await saveSegment(session, endedSegment, recordedAt).catch(() => null);
       if (saved) {
         savedRecords.push(saved);
+        session.savedSegmentKeys = [...(session.savedSegmentKeys || []), currentSegment.id].filter(Boolean).slice(-120);
+      } else {
+        session.pendingSegments = [
+          ...(Array.isArray(session.pendingSegments) ? session.pendingSegments : [])
+            .filter((segment) => segment?.id !== endedSegment.id),
+          endedSegment,
+        ].slice(-20);
       }
-      session.savedSegmentKeys = [...(session.savedSegmentKeys || []), currentSegment.id].filter(Boolean).slice(-120);
       const point = getStablePointForNewSegment(session, buildRoutePoint(pointCoords, 0));
       session.routePoints = appendSessionRoutePoint(session, point);
       const startIndex = Math.max(0, (session.routePoints || []).length - 1);

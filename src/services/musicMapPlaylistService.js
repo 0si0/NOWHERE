@@ -72,6 +72,7 @@ function normalizePlaylist(playlist = {}, index = 0) {
     spotifyPlaylistId: String(playlist.spotifyPlaylistId || playlist.playlistId || '').trim(),
     spotifyPlaylistUrl: String(playlist.spotifyPlaylistUrl || '').trim(),
     spotifyStartUrl: String(playlist.spotifyStartUrl || '').trim(),
+    playlistVisibility: String(playlist.playlistVisibility || '').trim(),
     ownerPlaylistTrackSignature: String(playlist.ownerPlaylistTrackSignature || '').trim(),
     tracks,
     createdAt: playlist.createdAt || now,
@@ -270,24 +271,44 @@ export async function createOwnerMusicMapSpotifyPlaylist(playlist = {}) {
     throw new Error('Spotify URI가 있는 곡을 먼저 추가해주세요.');
   }
 
-  const response = await callCloudFunctionOptionalAuth('createOwnerMusicMapPlaylist', {
-    playlistName: playlist.name || 'Music Map',
-    tracks: spotifyTracks.map((track) => ({
-      id: track.id,
-      trackId: track.trackId,
-      title: track.title,
-      artist: track.artist,
-      album: track.album,
-      albumArtUrl: track.albumArtUrl || track.artworkUrl,
-      artworkUrl: track.albumArtUrl || track.artworkUrl,
-      albumColor: track.albumColor || track.color,
-      spotifyUri: track.spotifyUri,
-      durationMs: track.durationMs,
-    })),
-  });
+  let response;
+  try {
+    response = await callCloudFunctionOptionalAuth('createOwnerMusicMapPlaylist', {
+      playlistName: playlist.name || 'Music Map',
+      tracks: spotifyTracks.map((track) => ({
+        id: track.id,
+        trackId: track.trackId,
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        albumArtUrl: track.albumArtUrl || track.artworkUrl,
+        artworkUrl: track.albumArtUrl || track.artworkUrl,
+        albumColor: track.albumColor || track.color,
+        spotifyUri: track.spotifyUri,
+        durationMs: track.durationMs,
+      })),
+    });
+  } catch (error) {
+    const detailMessage = error?.details?.message || error?.message || '';
+    const diagnosticId = error?.details?.diagnosticId ? `\n진단 ID: ${error.details.diagnosticId}` : '';
+    const stage = error?.details?.stage ? `\n실패 단계: ${error.details.stage}` : '';
+    const spotifyStatus = error?.details?.status ? `\nSpotify 상태: ${error.details.status}` : '';
+    const spotifyMessage = error?.details?.spotifyError?.error?.message
+      || error?.details?.spotifyError?.message
+      || error?.details?.spotifyError?.errorDescription
+      || '';
+    if (
+      detailMessage.includes('playlist-modify-public') ||
+      detailMessage.includes('playlist-modify-private')
+    ) {
+      throw new Error(`Owner Spotify 토큰에 playlist-modify-private 또는 playlist-modify-public 권한이 없습니다. owner refresh token을 playlist 생성 권한으로 다시 발급한 뒤 Firebase secret을 갱신해주세요.${diagnosticId}${stage}${spotifyStatus}`);
+    }
+    throw new Error(`${detailMessage || 'Owner Spotify playlist 생성에 실패했습니다.'}${spotifyMessage ? `\nSpotify 응답: ${spotifyMessage}` : ''}${diagnosticId}${stage}${spotifyStatus}`);
+  }
 
   const spotifyContextUri = String(response?.spotifyUri || '').trim();
-  const contextTracks = tracks.map((track) => ({
+  const returnedTracks = dedupeTracks(response?.tracks || spotifyTracks);
+  const contextTracks = returnedTracks.map((track) => ({
     ...track,
     spotifyContextUri,
   }));
@@ -295,6 +316,7 @@ export async function createOwnerMusicMapSpotifyPlaylist(playlist = {}) {
   return {
     spotifyPlaylistId: String(response?.spotifyPlaylistId || response?.playlistId || '').trim(),
     spotifyPlaylistUrl: String(response?.spotifyPlaylistUrl || '').trim(),
+    playlistVisibility: String(response?.playlistVisibility || '').trim(),
     spotifyUri: spotifyContextUri,
     spotifyStartUrl: buildSpotifyStartUrl(contextTracks, spotifyContextUri),
     ownerPlaylistTrackSignature: buildTrackSignature(contextTracks),

@@ -529,6 +529,10 @@ export async function signOutNowhereAccount() {
   await signOut(auth);
 }
 
+export async function clearSpotifyAccessRequestStatus() {
+  await AsyncStorage.removeItem(SPOTIFY_ACCESS_REQUEST_ID_KEY);
+}
+
 export function subscribeToAuthSession(onChange) {
   const { auth } = assertFirebaseConfigured();
 

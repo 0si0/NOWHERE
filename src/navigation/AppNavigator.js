@@ -10,12 +10,15 @@ import { SessionProvider } from '../contexts/SessionContext';
 
 import HomeScreen from '../screens/HomeScreen';
 import AuthGateScreen from '../screens/AuthGateScreen';
+import SpotifyPermissionScreen from '../screens/SpotifyPermissionScreen';
 import RecommendScreen from '../screens/RecommendScreen';
 import VibeScreen from '../screens/VibeScreen';
 import PlaceSetupScreen from '../screens/PlaceSetupScreen';
 import {
   getOnboardingAccountMode,
   isNowhereOnboardingComplete,
+  isSpotifyOnboardingComplete,
+  subscribeOnboardingReset,
 } from '../services/onboardingService';
 import { ensureOwnerSpotifyReady } from '../services/ownerSpotifyService';
 import { useSession } from '../contexts/SessionContext';
@@ -44,6 +47,7 @@ function AppEntry() {
   const [ownerSpotifyError, setOwnerSpotifyError] = useState('');
   const [isCheckingOnboarding, setIsCheckingOnboarding] = useState(true);
   const [isAccountReady, setIsAccountReady] = useState(false);
+  const [isSpotifyGateReady, setIsSpotifyGateReady] = useState(false);
   const [accountMode, setAccountMode] = useState('member');
   const { authUser, isLoading: isSessionLoading } = useSession();
 
@@ -61,6 +65,13 @@ function AppEntry() {
     runOwnerSpotifyPreflight();
   }, [runOwnerSpotifyPreflight]);
 
+  useEffect(() => subscribeOnboardingReset(() => {
+    setAccountMode('member');
+    setIsAccountReady(false);
+    setIsSpotifyGateReady(false);
+    setIsCheckingOnboarding(false);
+  }), []);
+
   useEffect(() => {
     if (isCheckingOwnerSpotify || ownerSpotifyError || isSessionLoading) {
       return undefined;
@@ -77,9 +88,11 @@ function AppEntry() {
       }
 
       const nextAccountMode = await getOnboardingAccountMode();
+      const spotifyReady = await isSpotifyOnboardingComplete();
       return {
         accountReady,
         accountMode: nextAccountMode,
+        spotifyReady,
       };
     }
 
@@ -88,6 +101,7 @@ function AppEntry() {
         if (!mounted) return;
         setIsAccountReady(Boolean(result.accountReady));
         setAccountMode(result.accountMode || 'member');
+        setIsSpotifyGateReady(Boolean(result.spotifyReady));
       })
       .catch(() => {
         if (!mounted) return;
@@ -145,6 +159,12 @@ function AppEntry() {
     return <AuthGateScreen onComplete={(nextMode = 'member') => {
       setAccountMode(nextMode);
       setIsAccountReady(true);
+    }} />;
+  }
+
+  if (!isSpotifyGateReady) {
+    return <SpotifyPermissionScreen onComplete={() => {
+      setIsSpotifyGateReady(true);
     }} />;
   }
 

@@ -1,11 +1,18 @@
 package com.nowhere.player
 
+import android.Manifest
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import com.spotify.android.appremote.api.ConnectionParams
 import com.spotify.android.appremote.api.Connector
 import com.spotify.android.appremote.api.SpotifyAppRemote
@@ -29,11 +36,15 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.suspendCoroutine
 import kotlin.math.roundToInt
 
 class NowherePlayerModule : Module() {
   private var clientId: String = ""
   private var redirectUri: String = "com.nowhere.nowhere://spotify-auth"
+  private var returnToAppUri: String = "com.nowhere.nowhere://spotify-auth"
   private var accessToken: String? = null
   private var tokenExpiresAtMs: Long = 0L
   private var spotifyAppRemote: SpotifyAppRemote? = null
@@ -48,13 +59,23 @@ class NowherePlayerModule : Module() {
   private var shouldOpenSpotifyAfterAuth: Boolean = false
   private var pendingAutoPlayPrimerUri: String? = null
   private var requestedScopes: Array<String> = arrayOf("user-read-currently-playing")
+  private var screenStateReceiver: BroadcastReceiver? = null
 
   override fun definition() = ModuleDefinition {
     Name("NowherePlayer")
 
-    Events("onPlaybackStateChanged")
+    Events("onPlaybackStateChanged", "onScreenStateChanged", "onPlaybackNotificationPressed")
+
+    OnStartObserving("onScreenStateChanged") {
+      registerScreenStateReceiver()
+    }
+
+    OnStopObserving("onScreenStateChanged") {
+      unregisterScreenStateReceiver()
+    }
 
     OnDestroy {
+      unregisterScreenStateReceiver()
       playerStateSubscription?.cancel()
       spotifyAppRemote?.let { SpotifyAppRemote.disconnect(it) }
       spotifyAppRemote = null
@@ -77,7 +98,7 @@ class NowherePlayerModule : Module() {
           if (shouldOpenSpotifyAfterAuth) {
             shouldOpenSpotifyAfterAuth = false
             playbackStatus = "preparingAutoPlay"
-            launchSpotifyUri(pendingAutoPlayPrimerUri ?: "spotify:")
+            launchSpotifyUri(pendingAutoPlayPrimerUri ?: "spotify:", requireSpotifyApp = true)
             pendingAutoPlayPrimerUri = null
             emitState()
           }
@@ -146,6 +167,73 @@ class NowherePlayerModule : Module() {
       connectToSpotify(promise)
     }
 
+    AsyncFunction("openSpotifyUrlAsync") { uri: String, options: Map<String, Any?>, promise: Promise ->
+      applyOptions(options)
+      try {
+        launchSpotifyUri(uri)
+        promise.resolve(currentState())
+      } catch (error: Throwable) {
+        promise.reject("ERR_SPOTIFY_OPEN", error.localizedMessage, error)
+      }
+    }
+
+    AsyncFunction("clearAuthorizationAsync") { promise: Promise ->
+      accessToken = null
+      tokenExpiresAtMs = 0L
+      spotifyTokenPrefs()?.edit()?.clear()?.apply()
+      currentTrack = null
+      playbackQueue = emptyList()
+      currentQueueIndex = 0
+      isPlaying = false
+      positionMs = 0L
+      playbackStatus = "stopped"
+      playerStateSubscription?.cancel()
+      playerStateSubscription = null
+      spotifyAppRemote?.let { SpotifyAppRemote.disconnect(it) }
+      spotifyAppRemote = null
+      emitState()
+      promise.resolve(currentState())
+    }
+
+    AsyncFunction("requestPlaybackNotificationPermissionAsync") { promise: Promise ->
+      val context = appContext.reactContext ?: run {
+        promise.resolve(mapOf("available" to false, "granted" to false, "status" to "unavailable"))
+        return@AsyncFunction
+      }
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+        promise.resolve(mapOf("available" to true, "granted" to true, "status" to "authorized"))
+        return@AsyncFunction
+      }
+      if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+        promise.resolve(mapOf("available" to true, "granted" to true, "status" to "authorized"))
+        return@AsyncFunction
+      }
+      appContext.currentActivity?.requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), PLAYBACK_NOTIFICATION_PERMISSION_REQUEST_CODE)
+      promise.resolve(mapOf("available" to true, "granted" to false, "requested" to true, "status" to "requested"))
+    }
+
+    AsyncFunction("schedulePlaybackNotificationAsync") { options: Map<String, Any?>, promise: Promise ->
+      val context = appContext.reactContext ?: run {
+        promise.reject("ERR_CONTEXT_UNAVAILABLE", "React context is unavailable.", null)
+        return@AsyncFunction
+      }
+      NowherePlaybackNotificationReceiver.schedule(context, options)
+      promise.resolve(mapOf("scheduled" to true, "identifier" to (options["identifier"] as? String ?: "")))
+    }
+
+    AsyncFunction("cancelPlaybackNotificationsAsync") { prefix: String, promise: Promise ->
+      val context = appContext.reactContext ?: run {
+        promise.resolve(mapOf("cancelled" to 0))
+        return@AsyncFunction
+      }
+      val cancelled = NowherePlaybackNotificationReceiver.cancel(context, prefix)
+      promise.resolve(mapOf("cancelled" to cancelled))
+    }
+
+    AsyncFunction("getPendingPlaybackNotificationAsync") { promise: Promise ->
+      promise.resolve(null)
+    }
+
     AsyncFunction("searchCatalogAsync") Coroutine { query: String, limit: Int ->
       return@Coroutine searchSpotifyTracks(query, limit.coerceIn(1, 25))
     }
@@ -188,9 +276,33 @@ class NowherePlayerModule : Module() {
         currentQueueIndex = 0
         isPlaying = true
       }
-      launchSpotifyUri(primerUri ?: "spotify:")
-      emitState()
-      promise.resolve(currentState())
+      if (primerUri == null) {
+        launchSpotifyUri("spotify:", requireSpotifyApp = true)
+        emitState()
+        promise.resolve(currentState())
+      } else {
+        ensureConnected(
+          onReady = {
+            val remote = spotifyAppRemote ?: run {
+              promise.reject("ERR_SPOTIFY_NOT_CONNECTED", "Spotify App Remote is not connected.", null)
+              return@ensureConnected
+            }
+            remote.playerApi.play(primerUri)
+              .setResultCallback {
+                playbackStatus = "playing"
+                isPlaying = true
+                emitState()
+                promise.resolve(currentState())
+              }
+              .setErrorCallback { error ->
+                promise.reject("ERR_SPOTIFY_COMMAND", error.localizedMessage, error)
+              }
+          },
+          onError = { error ->
+            promise.reject("ERR_SPOTIFY_CONNECT", error.localizedMessage, error)
+          }
+        )
+      }
     }
 
     AsyncFunction("playInBackgroundAsync") Coroutine { track: Map<String, Any?>, queue: List<Map<String, Any?>> ->
@@ -210,9 +322,9 @@ class NowherePlayerModule : Module() {
       playbackStatus = "loading"
       emitState()
 
-      launchSpotifyUri(uri)
+      playWithAppRemote(uri)
       isPlaying = true
-      playbackStatus = "openedSpotify"
+      playbackStatus = "playing"
       emitState()
       return@Coroutine currentState()
     }
@@ -235,16 +347,30 @@ class NowherePlayerModule : Module() {
       }
       currentQueueIndex = 0
       currentTrack = playbackQueue.firstOrNull()
-      isPlaying = true
-      playbackStatus = "openedSpotify"
+      playbackStatus = "loading"
+      emitState()
 
-      try {
-        launchSpotifyUri(uri)
-        emitState()
-        promise.resolve(currentState())
-      } catch (error: Throwable) {
-        promise.reject("ERR_SPOTIFY_OPEN", error.localizedMessage, error)
-      }
+      ensureConnected(
+        onReady = {
+          val remote = spotifyAppRemote ?: run {
+            promise.reject("ERR_SPOTIFY_NOT_CONNECTED", "Spotify App Remote is not connected.", null)
+            return@ensureConnected
+          }
+          remote.playerApi.play(uri)
+            .setResultCallback {
+              isPlaying = true
+              playbackStatus = "playing"
+              emitState()
+              promise.resolve(currentState())
+            }
+            .setErrorCallback { error ->
+              promise.reject("ERR_SPOTIFY_COMMAND", error.localizedMessage, error)
+            }
+        },
+        onError = { error ->
+          promise.reject("ERR_SPOTIFY_CONNECT", error.localizedMessage, error)
+        }
+      )
     }
 
     AsyncFunction("pauseAsync") { promise: Promise ->
@@ -296,21 +422,9 @@ class NowherePlayerModule : Module() {
       callPlayer(promise) { it.seekTo(positionMs.toLong().coerceAtLeast(0L)) }
     }
 
-    AsyncFunction("getStateAsync") { promise: Promise ->
-      val remote = spotifyAppRemote
-      if (remote == null || !remote.isConnected) {
-        promise.resolve(currentState())
-        return@AsyncFunction
-      }
-
-      remote.playerApi.playerState
-        .setResultCallback { state ->
-          updateFromPlayerState(state)
-          promise.resolve(currentState())
-        }
-        .setErrorCallback { error ->
-          promise.reject("ERR_SPOTIFY_STATE", error.localizedMessage, error)
-        }
+    AsyncFunction("getStateAsync") Coroutine {
+      refreshCurrentPlaybackState()
+      return@Coroutine currentState()
     }
   }
 
@@ -321,6 +435,12 @@ class NowherePlayerModule : Module() {
     }
     (options["spotifyRedirectUri"] as? String)?.takeIf { it.isNotBlank() }?.let {
       redirectUri = it
+    }
+    (options["returnToAppUri"] as? String)?.takeIf { it.isNotBlank() }?.let {
+      returnToAppUri = it
+    }
+    (options["returnUri"] as? String)?.takeIf { it.isNotBlank() }?.let {
+      returnToAppUri = it
     }
     val scopesOption = options["scopes"]
     requestedScopes = when (scopesOption) {
@@ -411,6 +531,27 @@ class NowherePlayerModule : Module() {
         override fun onFailure(error: Throwable) {
           onError(error)
         }
+      }
+    )
+  }
+
+  private suspend fun playWithAppRemote(uri: String) = suspendCoroutine<Unit> { continuation ->
+    ensureConnected(
+      onReady = {
+        val remote = spotifyAppRemote ?: run {
+          continuation.resumeWithException(IllegalStateException("Spotify App Remote is not connected."))
+          return@ensureConnected
+        }
+        remote.playerApi.play(uri)
+          .setResultCallback {
+            continuation.resume(Unit)
+          }
+          .setErrorCallback { error ->
+            continuation.resumeWithException(error)
+          }
+      },
+      onError = { error ->
+        continuation.resumeWithException(error)
       }
     )
   }
@@ -776,6 +917,66 @@ class NowherePlayerModule : Module() {
     }
   }
 
+  private suspend fun refreshCurrentPlaybackState() = withContext(Dispatchers.IO) {
+    val token = accessToken ?: return@withContext
+    val url = URL("https://api.spotify.com/v1/me/player/currently-playing")
+    val connection = (url.openConnection() as HttpURLConnection).apply {
+      requestMethod = "GET"
+      connectTimeout = 10000
+      readTimeout = 10000
+      setRequestProperty("Authorization", "Bearer $token")
+      setRequestProperty("Accept", "application/json")
+    }
+
+    try {
+      val status = connection.responseCode
+      if (status == 204) {
+        isPlaying = false
+        playbackStatus = "paused"
+        return@withContext
+      }
+      if (status !in 200..299) {
+        return@withContext
+      }
+
+      val body = connection.inputStream.bufferedReader().use { it.readText() }
+      if (body.isBlank()) {
+        return@withContext
+      }
+
+      val json = JSONObject(body)
+      isPlaying = json.optBoolean("is_playing", isPlaying)
+      positionMs = json.optLong("progress_ms", positionMs)
+      playbackStatus = if (isPlaying) "playing" else "paused"
+
+      val item = json.optJSONObject("item") ?: return@withContext
+      val album = item.optJSONObject("album")
+      val images = album?.optJSONArray("images")
+      val artists = item.optJSONArray("artists")
+      val firstArtist = artists?.optJSONObject(0)
+      val uri = item.optString("uri", "")
+      val liveTrack = mapOf(
+        "id" to item.optString("id", uri),
+        "spotifyUri" to uri,
+        "provider" to "spotify",
+        "title" to item.optString("name", ""),
+        "artist" to (firstArtist?.optString("name") ?: ""),
+        "album" to (album?.optString("name") ?: ""),
+        "artworkUrl" to (images?.optJSONObject(0)?.optString("url") ?: ""),
+        "durationMs" to item.optLong("duration_ms")
+      )
+      val queuedIndex = playbackQueue.indexOfFirst { it["spotifyUri"] == uri || it["id"] == uri }
+      if (queuedIndex >= 0) {
+        currentQueueIndex = queuedIndex
+        currentTrack = playbackQueue[queuedIndex] + liveTrack
+      } else {
+        currentTrack = liveTrack
+      }
+    } finally {
+      connection.disconnect()
+    }
+  }
+
   private fun updateFromPlayerState(state: PlayerState) {
     isPlaying = !state.isPaused
     positionMs = state.playbackPosition
@@ -828,7 +1029,7 @@ class NowherePlayerModule : Module() {
     )
   }
 
-  private fun launchSpotifyUri(uri: String) {
+  private fun launchSpotifyUri(uri: String, requireSpotifyApp: Boolean = false) {
     val context = appContext.reactContext ?: throw Exceptions.ReactContextLost()
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
       setPackage("com.spotify.music")
@@ -837,13 +1038,91 @@ class NowherePlayerModule : Module() {
 
     if (intent.resolveActivity(context.packageManager) != null) {
       context.startActivity(intent)
+      scheduleReturnToNowhere()
       return
+    }
+
+    if (requireSpotifyApp) {
+      throw IllegalStateException("Spotify app is not available.")
     }
 
     val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
     context.startActivity(fallbackIntent)
+    scheduleReturnToNowhere()
+  }
+
+  private fun scheduleReturnToNowhere() {
+    val context = appContext.reactContext ?: return
+    val uri = returnToAppUri.takeIf { it.isNotBlank() } ?: return
+    Handler(Looper.getMainLooper()).postDelayed({
+      try {
+        val returnIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
+          data = Uri.parse(uri)
+          action = Intent.ACTION_VIEW
+          addCategory(Intent.CATEGORY_BROWSABLE)
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+          addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        } ?: Intent(Intent.ACTION_VIEW, Uri.parse(uri)).apply {
+          setPackage(context.packageName)
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+          addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+          addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        context.startActivity(returnIntent)
+      } catch (error: Throwable) {
+      }
+    }, 1200L)
+  }
+
+  private fun registerScreenStateReceiver() {
+    val context = appContext.reactContext ?: return
+    if (screenStateReceiver != null) {
+      return
+    }
+
+    val receiver = object : BroadcastReceiver() {
+      override fun onReceive(context: Context?, intent: Intent?) {
+        when (intent?.action) {
+          Intent.ACTION_SCREEN_OFF -> sendEvent(
+            "onScreenStateChanged",
+            mapOf("state" to "off", "isScreenOn" to false)
+          )
+          Intent.ACTION_SCREEN_ON -> sendEvent(
+            "onScreenStateChanged",
+            mapOf("state" to "on", "isScreenOn" to true)
+          )
+          Intent.ACTION_USER_PRESENT -> sendEvent(
+            "onScreenStateChanged",
+            mapOf("state" to "unlocked", "isScreenOn" to true)
+          )
+        }
+      }
+    }
+    val filter = IntentFilter().apply {
+      addAction(Intent.ACTION_SCREEN_OFF)
+      addAction(Intent.ACTION_SCREEN_ON)
+      addAction(Intent.ACTION_USER_PRESENT)
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+      context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+    } else {
+      context.registerReceiver(receiver, filter)
+    }
+    screenStateReceiver = receiver
+  }
+
+  private fun unregisterScreenStateReceiver() {
+    val context = appContext.reactContext ?: return
+    val receiver = screenStateReceiver ?: return
+    try {
+      context.unregisterReceiver(receiver)
+    } catch (error: Throwable) {
+    } finally {
+      screenStateReceiver = null
+    }
   }
 
   private fun currentState(): Map<String, Any?> {
@@ -934,5 +1213,6 @@ class NowherePlayerModule : Module() {
 
   companion object {
     private const val SPOTIFY_AUTH_REQUEST_CODE = 4926
+    private const val PLAYBACK_NOTIFICATION_PERMISSION_REQUEST_CODE = 4927
   }
 }

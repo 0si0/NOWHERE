@@ -225,6 +225,19 @@ export function PlayerProvider({ children }) {
     }
   }, [applyState]);
 
+  const clearAuthorization = useCallback(async () => {
+    const state = await musicPlayerService.clearAuthorization();
+    applyState(state || {
+      currentTrack: null,
+      isPlaying: false,
+      playbackStatus: 'stopped',
+      queue: [],
+      authorizationStatus: 'notDetermined',
+      isAuthorized: false,
+    });
+    return state;
+  }, [applyState]);
+
   const getState = useCallback(async () => {
     const state = await musicPlayerService.getState();
     applyState(state);
@@ -232,6 +245,9 @@ export function PlayerProvider({ children }) {
   }, [applyState]);
 
   useEffect(() => {
+    if (playerState.authorizationStatus === 'sequentialUrl') {
+      return undefined;
+    }
     const shouldPoll = Boolean(playerState.currentTrack)
       || ['loading', 'openedSpotify', 'playing', 'paused'].includes(playerState.playbackStatus);
     if (!shouldPoll) {
@@ -255,11 +271,11 @@ export function PlayerProvider({ children }) {
     }, playerState.isPlaying ? 2500 : 5000);
 
     return () => clearInterval(interval);
-  }, [getState, playerState.currentTrack, playerState.isPlaying, playerState.playbackStatus]);
+  }, [getState, playerState.authorizationStatus, playerState.currentTrack, playerState.isPlaying, playerState.playbackStatus]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
-      if (nextState === 'active' && playerState.currentTrack) {
+      if (nextState === 'active' && playerState.currentTrack && playerState.authorizationStatus !== 'sequentialUrl') {
         getState().catch((error) => {
           setPlayerState((prev) => ({
             ...prev,
@@ -270,7 +286,7 @@ export function PlayerProvider({ children }) {
     });
 
     return () => subscription.remove();
-  }, [getState, playerState.currentTrack]);
+  }, [getState, playerState.authorizationStatus, playerState.currentTrack]);
 
   const subscribeState = useCallback((listener) => (
     musicPlayerService.subscribeState((state) => {
@@ -298,6 +314,7 @@ export function PlayerProvider({ children }) {
     seek,
     seekTo,
     stop,
+    clearAuthorization,
     getState,
     subscribeState,
   }), [
@@ -315,6 +332,7 @@ export function PlayerProvider({ children }) {
     seek,
     seekTo,
     stop,
+    clearAuthorization,
     getState,
     subscribeState,
   ]);

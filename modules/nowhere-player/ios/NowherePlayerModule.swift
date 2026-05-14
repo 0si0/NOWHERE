@@ -3,6 +3,7 @@ import CryptoKit
 import ExpoModulesCore
 import Foundation
 import UIKit
+import UserNotifications
 
 public final class NowherePlayerModule: Module, @unchecked Sendable {
   private let tokenStorageAccessTokenKey = "nowhere.spotify.accessToken"
@@ -10,6 +11,7 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
   private let tokenStorageExpiresAtKey = "nowhere.spotify.expiresAt"
   private var clientId = ""
   private var redirectUri = "com.nowhere.nowhere://spotify-auth"
+  private var returnToAppUri = "com.nowhere.nowhere://spotify-auth"
   private var accessToken: String?
   private var refreshToken: String?
   private var tokenExpiresAt: Date?
@@ -22,17 +24,37 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
   private var lastError: String?
   private var requestedScopes = ["user-read-currently-playing"]
   private var authSession: ASWebAuthenticationSession?
+  private var screenStateObservers: [NSObjectProtocol] = []
+  private var returnBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+  private var pendingPlaybackNotification: [String: Any?]?
+  private lazy var playbackNotificationDelegate = PlaybackNotificationDelegate { [weak self] payload in
+    self?.pendingPlaybackNotification = payload
+    self?.sendEvent("onPlaybackNotificationPressed", payload)
+  }
   private let authPresentationContextProvider = AuthPresentationContextProvider()
   private let appRemoteCoordinator = SpotifyAppRemoteCoordinator.shared
 
   public func definition() -> ModuleDefinition {
     Name("NowherePlayer")
 
-    Events("onPlaybackStateChanged")
+    Events("onPlaybackStateChanged", "onScreenStateChanged", "onPlaybackNotificationPressed")
+
+    OnCreate {
+      UNUserNotificationCenter.current().delegate = self.playbackNotificationDelegate
+    }
+
+    OnStartObserving("onScreenStateChanged") {
+      self.startScreenStateObserving()
+    }
+
+    OnStopObserving("onScreenStateChanged") {
+      self.stopScreenStateObserving()
+    }
 
     OnDestroy {
       self.authSession?.cancel()
       self.authSession = nil
+      self.stopScreenStateObserving()
       self.appRemoteCoordinator.onPlayerState = nil
       self.appRemoteCoordinator.onStatus = nil
       self.appRemoteCoordinator.disconnect()
@@ -59,6 +81,48 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       try await self.ensureAuthorized()
       await self.refreshPlayerState()
       return self.currentState()
+    }
+
+    AsyncFunction("openSpotifyUrlAsync") { (uri: String, options: [String: Any]) async throws -> [String: Any?] in
+      self.applyOptions(options)
+      try await self.openSpotify(uri: uri)
+      return self.currentState()
+    }
+
+    AsyncFunction("clearAuthorizationAsync") { () async -> [String: Any?] in
+      self.accessToken = nil
+      self.refreshToken = nil
+      self.tokenExpiresAt = nil
+      self.currentTrack = nil
+      self.playbackQueue = []
+      self.currentQueueIndex = 0
+      self.isPlaying = false
+      self.positionMs = 0
+      self.playbackStatus = "stopped"
+      self.lastError = nil
+      self.persistSpotifySession()
+      self.appRemoteCoordinator.setAccessToken(nil)
+      self.appRemoteCoordinator.disconnect()
+      self.emitState()
+      return self.currentState()
+    }
+
+    AsyncFunction("requestPlaybackNotificationPermissionAsync") { () async throws -> [String: Any] in
+      try await self.requestPlaybackNotificationPermission()
+    }
+
+    AsyncFunction("schedulePlaybackNotificationAsync") { (options: [String: Any]) async throws -> [String: Any] in
+      try await self.schedulePlaybackNotification(options: options)
+    }
+
+    AsyncFunction("cancelPlaybackNotificationsAsync") { (prefix: String) async throws -> [String: Any] in
+      try await self.cancelPlaybackNotifications(prefix: prefix)
+    }
+
+    AsyncFunction("getPendingPlaybackNotificationAsync") { () -> [String: Any?]? in
+      let payload = self.pendingPlaybackNotification
+      self.pendingPlaybackNotification = nil
+      return payload
     }
 
     AsyncFunction("searchCatalogAsync") { (query: String, limit: Int) async throws -> [[String: Any?]] in
@@ -94,14 +158,18 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       self.applyOptions(options)
       let primerTrack = options["autoPlayPrimer"] as? [String: Any]
       let primerUri = primerTrack.flatMap { self.spotifyUri(from: $0) }
-      self.openSpotify(uri: primerUri ?? "spotify:")
+      if let primerUri {
+        try await self.startSpotifyPlaybackWithAppRemote(uri: primerUri)
+      } else {
+        try await self.openSpotify(uri: "spotify:")
+      }
       if let primerTrack {
         self.currentTrack = primerTrack.mapValues { Optional($0) }
         self.playbackQueue = [self.currentTrack].compactMap { $0 }
         self.currentQueueIndex = 0
       }
       self.isPlaying = primerUri != nil
-      self.playbackStatus = "preparingAutoPlay"
+      self.playbackStatus = primerUri == nil ? "openedSpotify" : "playing"
       self.lastError = nil
       self.emitState()
       return self.currentState()
@@ -126,9 +194,9 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       self.lastError = nil
       self.emitState()
 
-      self.openSpotify(uri: uri)
+      try await self.startSpotifyPlaybackWithAppRemote(uri: uri)
       self.isPlaying = true
-      self.playbackStatus = "openedSpotify"
+      self.playbackStatus = "playing"
       self.lastError = nil
       self.emitState()
       return self.currentState()
@@ -153,9 +221,9 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       self.lastError = nil
       self.emitState()
 
-      self.openSpotify(uri: uri)
+      try await self.startSpotifyPlaybackWithAppRemote(uri: uri)
       self.isPlaying = true
-      self.playbackStatus = "openedSpotify"
+      self.playbackStatus = "playing"
       self.lastError = nil
 
       self.emitState()
@@ -239,6 +307,9 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     }
     if let nextRedirectUri = firstString(options, keys: ["spotifyRedirectUri", "redirectUri"]) {
       redirectUri = nextRedirectUri
+    }
+    if let nextReturnToAppUri = firstString(options, keys: ["returnToAppUri", "returnUri"]) {
+      returnToAppUri = nextReturnToAppUri
     }
     if let scopes = options["scopes"] as? [String] {
       let normalizedScopes = scopes
@@ -732,6 +803,76 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     emitState()
   }
 
+  private func requestPlaybackNotificationPermission() async throws -> [String: Any] {
+    let center = UNUserNotificationCenter.current()
+    let settings = await center.notificationSettings()
+    if settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional {
+      return [
+        "available": true,
+        "granted": true,
+        "status": "authorized"
+      ]
+    }
+
+    let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+    return [
+      "available": true,
+      "granted": granted,
+      "status": granted ? "authorized" : "denied"
+    ]
+  }
+
+  private func schedulePlaybackNotification(options: [String: Any]) async throws -> [String: Any] {
+    let permission = try await requestPlaybackNotificationPermission()
+    guard permission["granted"] as? Bool == true else {
+      return [
+        "scheduled": false,
+        "reason": "permission-denied"
+      ]
+    }
+
+    let identifier = firstString(options, keys: ["identifier", "id"]) ?? "nowhere-music-map-sequential"
+    let title = firstString(options, keys: ["title"]) ?? "다음 곡을 재생할 시간이에요"
+    let body = firstString(options, keys: ["body"]) ?? "잠금화면에서 탭하면 Spotify로 열어요."
+    let url = firstString(options, keys: ["url", "deepLink"]) ?? returnToAppUri
+    let delayMs = max(1000, options["delayMs"] as? Int ?? 1000)
+    let payload = options["payload"] as? [String: Any] ?? [:]
+
+    let content = UNMutableNotificationContent()
+    content.title = title
+    content.body = body
+    content.sound = .default
+    var userInfo = payload
+    userInfo["url"] = url
+    userInfo["identifier"] = identifier
+    userInfo["source"] = "nowhere-playback-notification"
+    content.userInfo = userInfo
+
+    let trigger = UNTimeIntervalNotificationTrigger(
+      timeInterval: max(1.0, Double(delayMs) / 1000.0),
+      repeats: false
+    )
+    let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
+    try await UNUserNotificationCenter.current().add(request)
+    return [
+      "scheduled": true,
+      "identifier": identifier
+    ]
+  }
+
+  private func cancelPlaybackNotifications(prefix: String) async throws -> [String: Any] {
+    let center = UNUserNotificationCenter.current()
+    let pending = await center.pendingNotificationRequests()
+    let identifiers = pending
+      .map { $0.identifier }
+      .filter { prefix.isEmpty || $0.hasPrefix(prefix) }
+    center.removePendingNotificationRequests(withIdentifiers: identifiers)
+    center.removeDeliveredNotifications(withIdentifiers: identifiers)
+    return [
+      "cancelled": identifiers.count
+    ]
+  }
+
   private func serializeSpotifyTrack(_ item: [String: Any]) -> [String: Any?] {
     let album = item["album"] as? [String: Any]
     let images = album?["images"] as? [[String: Any]]
@@ -784,14 +925,92 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
     return payload
   }
 
-  private func openSpotify(uri: String) {
+  private func openSpotify(uri: String) async throws {
     guard let openURL = URL(string: uri) ?? URL(string: "spotify:") else {
-      return
+      throw NowherePlayerException("Spotify URL is invalid.")
     }
 
-    DispatchQueue.main.async {
-      UIApplication.shared.open(openURL)
+    let opened = await withCheckedContinuation { continuation in
+      DispatchQueue.main.async {
+        if openURL.scheme == "spotify" && !UIApplication.shared.canOpenURL(openURL) {
+          continuation.resume(returning: false)
+          return
+        }
+        UIApplication.shared.open(openURL, options: [:]) { success in
+          continuation.resume(returning: success)
+        }
+      }
     }
+
+    if !opened {
+      throw NowherePlayerException("Spotify URL could not be opened.")
+    }
+    scheduleReturnToNowhere()
+  }
+
+  private func scheduleReturnToNowhere() {
+    guard let returnURL = URL(string: returnToAppUri) else {
+      return
+    }
+    DispatchQueue.main.async {
+      if self.returnBackgroundTask != .invalid {
+        UIApplication.shared.endBackgroundTask(self.returnBackgroundTask)
+        self.returnBackgroundTask = .invalid
+      }
+
+      self.returnBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "NowhereReturnFromSpotify") { [weak self] in
+        guard let self else { return }
+        if self.returnBackgroundTask != .invalid {
+          UIApplication.shared.endBackgroundTask(self.returnBackgroundTask)
+          self.returnBackgroundTask = .invalid
+        }
+      }
+
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        UIApplication.shared.open(returnURL, options: [:]) { [weak self] _ in
+          guard let self else { return }
+          if self.returnBackgroundTask != .invalid {
+            UIApplication.shared.endBackgroundTask(self.returnBackgroundTask)
+            self.returnBackgroundTask = .invalid
+          }
+        }
+      }
+    }
+  }
+
+  private func startScreenStateObserving() {
+    guard screenStateObservers.isEmpty else {
+      return
+    }
+    let center = NotificationCenter.default
+    screenStateObservers = [
+      center.addObserver(
+        forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        self?.sendEvent("onScreenStateChanged", [
+          "state": "locked",
+          "isScreenOn": false
+        ])
+      },
+      center.addObserver(
+        forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        self?.sendEvent("onScreenStateChanged", [
+          "state": "unlocked",
+          "isScreenOn": true
+        ])
+      }
+    ]
+  }
+
+  private func stopScreenStateObserving() {
+    let center = NotificationCenter.default
+    screenStateObservers.forEach { center.removeObserver($0) }
+    screenStateObservers.removeAll()
   }
 
   private func advanceQueueIndex(_ offset: Int) {
@@ -1030,6 +1249,49 @@ private final class AuthPresentationContextProvider: NSObject, ASWebAuthenticati
   func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
     let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
     return scenes.flatMap { $0.windows }.first { $0.isKeyWindow } ?? ASPresentationAnchor()
+  }
+}
+
+private final class PlaybackNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+  private let onPress: ([String: Any?]) -> Void
+
+  init(onPress: @escaping ([String: Any?]) -> Void) {
+    self.onPress = onPress
+    super.init()
+  }
+
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    willPresent notification: UNNotification,
+    withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+  ) {
+    let source = notification.request.content.userInfo["source"] as? String
+    if source == "nowhere-playback-notification" {
+      completionHandler([])
+      return
+    }
+    completionHandler([.banner, .sound])
+  }
+
+  func userNotificationCenter(
+    _ center: UNUserNotificationCenter,
+    didReceive response: UNNotificationResponse,
+    withCompletionHandler completionHandler: @escaping () -> Void
+  ) {
+    let userInfo = response.notification.request.content.userInfo
+    guard userInfo["source"] as? String == "nowhere-playback-notification" else {
+      completionHandler()
+      return
+    }
+
+    var payload: [String: Any?] = [:]
+    userInfo.forEach { key, value in
+      if let key = key as? String {
+        payload[key] = value
+      }
+    }
+    onPress(payload)
+    completionHandler()
   }
 }
 

@@ -595,9 +595,7 @@ export default function PlaceSetupScreen({ navigation }) {
                 </Text>
               </View>
             </View>
-          ) : (
-            <Text style={styles.helperText}>이 장소에 도착했을 때 Spotify 앱으로 열 곡 또는 NOWHERE 플레이리스트를 선택하세요.</Text>
-          )}
+          ) : null}
 
           {trackResults.map((track) => (
             <TrackResultCard
@@ -643,7 +641,7 @@ export default function PlaceSetupScreen({ navigation }) {
             </View>
           ) : activePlaces.length === 0 ? (
             <View style={styles.emptyState}>
-              <Text style={styles.emptyStateText}>아직 저장한 장소가 없어요. 지도에서 장소를 고르고 곡을 연결해보세요.</Text>
+              <Text style={styles.emptyStateText}>아직 저장한 장소가 없어요.</Text>
             </View>
           ) : (
             activePlaces.map((place) => (

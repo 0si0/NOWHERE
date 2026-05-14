@@ -33,7 +33,7 @@ const UI = {
 const SPOTIFY_USER_INFO_HELP_IMAGE = require('../../assets/spotify-user-info-help.png');
 const HELP_IMAGE_ASPECT_RATIO = 1179 / 1800;
 const HELP_IMAGE_WIDTH = Math.min(Dimensions.get('window').width - 60, 430);
-const SHOW_MANUAL_SPOTIFY_ACCESS_REQUEST_FORM = false;
+const SHOW_MANUAL_SPOTIFY_ACCESS_REQUEST_FORM = true;
 
 function isSpotifyAuthorized(result = {}, state = {}) {
   return result?.authorized === true
@@ -164,6 +164,11 @@ export default function SpotifyPermissionScreen({ onComplete }) {
     }
   };
 
+  const handleContinueBasicMode = async () => {
+    await markSpotifyOnboardingComplete();
+    onComplete?.('basic');
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <KeyboardAvoidingView
@@ -173,7 +178,7 @@ export default function SpotifyPermissionScreen({ onComplete }) {
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           <View style={styles.logoBlock}>
             <Text style={styles.logo}>NOWHERE</Text>
-            <Text style={styles.subtitle}>Spotify 권한을 연결합니다</Text>
+            <Text style={styles.subtitle}>뮤직지도 모드를 선택합니다</Text>
           </View>
 
           <View style={styles.statusPanel}>
@@ -190,9 +195,9 @@ export default function SpotifyPermissionScreen({ onComplete }) {
             <View style={styles.statusRow}>
               <Ionicons name="musical-notes-outline" size={24} color={UI.peach} />
               <View style={styles.statusTextWrap}>
-                <Text style={styles.statusTitle}>Spotify 연결</Text>
+                <Text style={styles.statusTitle}>일반 뮤직지도</Text>
                 <Text style={styles.statusText}>
-                  권한이 만료되었을 때 이 단계만 다시 진행합니다
+                  Spotify 계정 등록 없이 NOWHERE 플레이리스트 기반 뮤직지도를 사용할 수 있어요
                 </Text>
               </View>
             </View>
@@ -206,12 +211,15 @@ export default function SpotifyPermissionScreen({ onComplete }) {
           ) : null}
 
           {SHOW_MANUAL_SPOTIFY_ACCESS_REQUEST_FORM && !hasAccessRequest ? <View style={styles.requestPanel}>
-            <Text style={styles.requestTitle}>공모전 심사용 등록 요청</Text>
+            <Text style={styles.requestTitle}>고급모드 Spotify 계정 등록 요청</Text>
             <Text style={styles.requestText}>
-              NOWHERE는 Spotify 개발 모드 제한으로 인해 사전 권한 등록이 필요합니다. Spotify 계정의 이름과 이메일을 입력해 권한 요청을 먼저 진행해주세요.
+              Spotify Development Mode 정책상 실제 Spotify 재생 상태 기반 기록은 등록된 고급모드 계정에서만 사용할 수 있어요.
             </Text>
             <Text style={styles.requestText}>
-              Spotify에 접속하여 왼쪽 상단 프로필 마크 클릭 → 설정 및 개인정보 → 계정 → 사용자 이름과 이메일을 복사해서 붙여넣어주세요.
+              고급모드로 테스트하려면 Spotify 계정의 full name과 email을 입력해주세요.
+            </Text>
+            <Text style={styles.requestText}>
+              일반 모드에서는 Spotify 계정 등록 없이 NOWHERE 플레이리스트 기반 뮤직지도를 사용할 수 있어요.
             </Text>
             <TouchableOpacity
               style={styles.helpButton}
@@ -225,7 +233,7 @@ export default function SpotifyPermissionScreen({ onComplete }) {
               style={styles.input}
               value={spotifyFullName}
               onChangeText={setSpotifyFullName}
-              placeholder="Spotify 사용자 이름"
+              placeholder="Spotify full name"
               placeholderTextColor={UI.textMuted}
               autoCapitalize="none"
               autoCorrect={false}
@@ -291,6 +299,16 @@ export default function SpotifyPermissionScreen({ onComplete }) {
                 <Text style={styles.connectButtonText}>Spotify 연결</Text>
               </>
             )}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.basicModeButton}
+            activeOpacity={0.86}
+            onPress={handleContinueBasicMode}
+            disabled={isConnecting || isSubmittingRequest}
+          >
+            <Ionicons name="map-outline" size={20} color={UI.peach} />
+            <Text style={styles.basicModeButtonText}>일반 모드로 계속</Text>
           </TouchableOpacity>
 
           {requestMessage ? <Text style={styles.infoText}>{requestMessage}</Text> : null}
@@ -418,6 +436,23 @@ const styles = StyleSheet.create({
   connectButtonText: {
     color: '#07100B',
     fontSize: 15,
+    fontWeight: '900',
+  },
+  basicModeButton: {
+    marginTop: 12,
+    height: 52,
+    borderRadius: 26,
+    borderWidth: 1,
+    borderColor: UI.border,
+    backgroundColor: 'rgba(255, 201, 184, 0.06)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  basicModeButtonText: {
+    color: UI.peach,
+    fontSize: 14,
     fontWeight: '900',
   },
   checkingPanel: {

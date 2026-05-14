@@ -25,6 +25,10 @@ const DEFAULT_RECOMMENDATION_MODEL = process.env.OPENAI_RECOMMENDATION_MODEL || 
 const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
 const SPOTIFY_REQUESTED_TREND_PLAYLIST_ID = '37i9dQZEVXbJZGli0rRP3r';
 const SPOTIFY_KR_TOP_50_PLAYLIST_ID = '37i9dQZEVXbNxXF4SkHj9F';
+const OWNER_PLAYLIST_PUBLIC_SCOPE = 'playlist-modify-public';
+const OWNER_PLAYLIST_PRIVATE_SCOPE = 'playlist-modify-private';
+const OWNER_PLAYLIST_WRITE_SCOPES = [OWNER_PLAYLIST_PRIVATE_SCOPE, OWNER_PLAYLIST_PUBLIC_SCOPE];
+const OWNER_PLAYLIST_DIAGNOSTIC_COLLECTION = 'spotifyOwnerPlaylistDiagnostics';
 let ownerSpotifyTokenCache = {
   accessToken: '',
   accessTokenExpiresAt: 0,
@@ -32,6 +36,8 @@ let ownerSpotifyTokenCache = {
 let ownerSpotifyUserTokenCache = {
   accessToken: '',
   accessTokenExpiresAt: 0,
+  scopes: [],
+  scopesKnown: false,
 };
 
 function getOpenAiApiKey() {
@@ -162,6 +168,130 @@ function buildOwnerMusicMapPlaylistName(name = '') {
   return `NOWHERE Music Map · ${getKstDayKey()}`;
 }
 
+function getSpotifyScopeList(scopeText = '') {
+  return String(scopeText || '')
+    .split(/\s+/)
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+}
+
+function getOwnerPlaylistRequiredScopeText() {
+  return OWNER_PLAYLIST_WRITE_SCOPES.join(' 또는 ');
+}
+
+function hasAnyOwnerPlaylistWriteScope(scopes = []) {
+  return OWNER_PLAYLIST_WRITE_SCOPES.some((scope) => scopes.includes(scope));
+}
+
+function getOwnerPlaylistVisibilityPreference() {
+  const value = String(process.env.SPOTIFY_OWNER_PLAYLIST_VISIBILITY || '').trim().toLowerCase();
+  if (value === 'public' || value === 'private') {
+    return value;
+  }
+  return '';
+}
+
+function getOwnerPlaylistCreateAttempts(scopes = []) {
+  const preference = getOwnerPlaylistVisibilityPreference();
+  const attempts = [];
+  const addAttempt = (visibility) => {
+    if (visibility === 'public') {
+      attempts.push({
+        visibility,
+        isPublic: true,
+        requiredScope: OWNER_PLAYLIST_PUBLIC_SCOPE,
+        stage: 'create-public-playlist',
+      });
+    }
+    if (visibility === 'private') {
+      attempts.push({
+        visibility,
+        isPublic: false,
+        requiredScope: OWNER_PLAYLIST_PRIVATE_SCOPE,
+        stage: 'create-private-playlist',
+      });
+    }
+  };
+
+  if (preference === 'public') {
+    addAttempt(preference);
+  }
+  addAttempt('private');
+  if (preference !== 'public') {
+    addAttempt('public');
+  }
+
+  return attempts.filter((attempt, index, list) => (
+    list.findIndex((candidate) => candidate.visibility === attempt.visibility) === index
+  ));
+}
+
+function buildSpotifyApiMessage(status, errorBody, requiredScope = getOwnerPlaylistRequiredScopeText()) {
+  const spotifyError = errorBody?.error;
+  const message = typeof spotifyError === 'object'
+    ? spotifyError.message
+    : errorBody?.error_description || errorBody?.message || '';
+  const errorType = typeof spotifyError === 'string' ? spotifyError : spotifyError?.status;
+  if (errorType === 'invalid_scope' || String(message).toLowerCase().includes('invalid scope')) {
+    return `Owner Spotify refresh token에 ${requiredScope} 권한이 없습니다. 해당 scope로 refresh token을 다시 발급해야 합니다.`;
+  }
+  if (status === 403 && String(message).toLowerCase().includes('scope')) {
+    return `Owner Spotify refresh token에 ${requiredScope} 권한이 없습니다. 해당 scope로 refresh token을 다시 발급해야 합니다.`;
+  }
+  if (status === 403) {
+    return `Spotify가 owner playlist 쓰기 요청을 거부했습니다. owner token 권한과 계정 상태를 확인해주세요. (${message || '403 Forbidden'})`;
+  }
+  if (status === 401) {
+    return 'Owner Spotify refresh token이 만료되었거나 잘못되었습니다. refresh token을 다시 발급해주세요.';
+  }
+  if (status === 400) {
+    return `Spotify playlist 생성 요청 형식이 올바르지 않습니다. (${message || '400 Bad Request'})`;
+  }
+  return `Spotify playlist 생성 요청에 실패했습니다. (${status}${message ? `: ${message}` : ''})`;
+}
+
+function sanitizeSpotifyErrorBody(value) {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    return cleanText(value, 1000);
+  }
+  if (typeof value !== 'object') {
+    return cleanText(String(value), 1000);
+  }
+  const spotifyError = value.error;
+  return {
+    error: typeof spotifyError === 'object'
+      ? {
+        status: spotifyError.status || null,
+        message: cleanText(spotifyError.message, 500),
+        reason: cleanText(spotifyError.reason, 300),
+      }
+      : cleanText(spotifyError, 300),
+    errorDescription: cleanText(value.error_description, 500),
+    message: cleanText(value.message, 500),
+  };
+}
+
+function buildDiagnosticId(prefix = 'spotify-owner-playlist') {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function writeOwnerPlaylistDiagnostic(diagnostic = {}) {
+  try {
+    const docRef = db.collection(OWNER_PLAYLIST_DIAGNOSTIC_COLLECTION).doc(diagnostic.diagnosticId || buildDiagnosticId());
+    await docRef.set({
+      ...diagnostic,
+      createdAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+    return docRef.id;
+  } catch (error) {
+    logger.warn('Owner Spotify diagnostic write failed', {
+      message: error?.message || String(error),
+    });
+    return diagnostic.diagnosticId || '';
+  }
+}
+
 async function getOwnerSpotifyAccessToken() {
   if (
     ownerSpotifyTokenCache.accessToken &&
@@ -197,12 +327,25 @@ async function getOwnerSpotifyAccessToken() {
   return json.access_token;
 }
 
-async function getOwnerSpotifyUserAccessToken() {
+async function getOwnerSpotifyUserAccessToken({ forceRefresh = false } = {}) {
   if (
+    !forceRefresh &&
     ownerSpotifyUserTokenCache.accessToken &&
-    ownerSpotifyUserTokenCache.accessTokenExpiresAt > Date.now() + 60 * 1000
+    ownerSpotifyUserTokenCache.accessTokenExpiresAt > Date.now() + 60 * 1000 &&
+    (
+      !ownerSpotifyUserTokenCache.scopesKnown ||
+      hasAnyOwnerPlaylistWriteScope(ownerSpotifyUserTokenCache.scopes)
+    )
   ) {
-    return ownerSpotifyUserTokenCache.accessToken;
+    return {
+      accessToken: ownerSpotifyUserTokenCache.accessToken,
+      scopes: ownerSpotifyUserTokenCache.scopes,
+      tokenType: 'Bearer',
+      expiresIn: Math.max(0, Math.round((ownerSpotifyUserTokenCache.accessTokenExpiresAt - Date.now()) / 1000)),
+      refreshedAtIso: ownerSpotifyUserTokenCache.refreshedAtIso || '',
+      fromCache: true,
+      scopesKnown: ownerSpotifyUserTokenCache.scopesKnown,
+    };
   }
 
   const credentials = Buffer
@@ -222,17 +365,43 @@ async function getOwnerSpotifyUserAccessToken() {
     body: body.toString(),
   });
   const json = await response.json().catch(() => null);
+  const scopes = getSpotifyScopeList(json?.scope);
+  if (response.ok && scopes.length && !hasAnyOwnerPlaylistWriteScope(scopes)) {
+    logger.error('Owner Spotify user token does not include required playlist scope', {
+      returnedScopes: scopes,
+      requiredScopes: OWNER_PLAYLIST_WRITE_SCOPES,
+    });
+    throw new HttpsError(
+      'failed-precondition',
+      `Owner Spotify refresh token에 ${getOwnerPlaylistRequiredScopeText()} 권한이 없습니다.`
+    );
+  }
   if (!response.ok || !json?.access_token) {
     logger.error('Owner Spotify user token refresh failed', {
       status: response.status,
       error: json?.error,
       errorDescription: json?.error_description,
     });
-    throw new HttpsError('failed-precondition', 'Owner Spotify user token refresh failed.');
+    throw new HttpsError(
+      'failed-precondition',
+      buildSpotifyApiMessage(response.status, json || {})
+    );
   }
   ownerSpotifyUserTokenCache.accessToken = json.access_token;
   ownerSpotifyUserTokenCache.accessTokenExpiresAt = Date.now() + Math.max(60, Number(json.expires_in || 3600)) * 1000;
-  return json.access_token;
+  ownerSpotifyUserTokenCache.scopes = scopes;
+  ownerSpotifyUserTokenCache.scopesKnown = scopes.length > 0;
+  ownerSpotifyUserTokenCache.refreshedAtIso = new Date().toISOString();
+  return {
+    accessToken: json.access_token,
+    scopes: ownerSpotifyUserTokenCache.scopes,
+    tokenType: json.token_type || 'Bearer',
+    expiresIn: Number(json.expires_in || 0),
+    refreshedAtIso: ownerSpotifyUserTokenCache.refreshedAtIso,
+    fromCache: false,
+    spotifyReturnedScopes: scopes,
+    scopesKnown: ownerSpotifyUserTokenCache.scopesKnown,
+  };
 }
 
 async function ownerSpotifyJSONRequest(path, accessToken) {
@@ -255,7 +424,50 @@ async function ownerSpotifyJSONRequest(path, accessToken) {
   return json;
 }
 
-async function ownerSpotifyWriteRequest(path, accessToken, { method = 'POST', body = null } = {}) {
+async function ownerSpotifyJSONRequestStrict(path, accessToken, {
+  diagnosticId = '',
+  stage = 'spotify-read',
+  requiredScope = getOwnerPlaylistRequiredScopeText(),
+} = {}) {
+  const response = await fetch(`https://api.spotify.com${path}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json',
+    },
+  });
+  const json = await response.json().catch(() => null);
+  if (!response.ok) {
+    const message = buildSpotifyApiMessage(response.status, json || {}, requiredScope);
+    const spotifyError = sanitizeSpotifyErrorBody(json || {});
+    logger.error('Owner Spotify read request failed', {
+      diagnosticId,
+      stage,
+      path,
+      status: response.status,
+      spotifyError,
+      message,
+    });
+    throw new HttpsError(response.status === 403 ? 'permission-denied' : 'failed-precondition', message, {
+      diagnosticId,
+      stage,
+      status: response.status,
+      path,
+      method: 'GET',
+      spotifyError,
+      requiredScope,
+    });
+  }
+  return json || {};
+}
+
+async function ownerSpotifyWriteRequest(path, accessToken, {
+  method = 'POST',
+  body = null,
+  stage = 'spotify-write',
+  diagnosticId = '',
+  requiredScope = getOwnerPlaylistRequiredScopeText(),
+} = {}) {
   const response = await fetch(`https://api.spotify.com${path}`, {
     method,
     headers: {
@@ -275,13 +487,27 @@ async function ownerSpotifyWriteRequest(path, accessToken, { method = 'POST', bo
     }
   }
   if (!response.ok) {
+    const message = buildSpotifyApiMessage(response.status, json || text, requiredScope);
+    const spotifyError = sanitizeSpotifyErrorBody(json || text);
     logger.error('Owner Spotify write request failed', {
+      diagnosticId,
+      stage,
       path,
       method,
       status: response.status,
-      error: json?.error || text,
+      spotifyError,
+      message,
     });
-    throw new HttpsError('failed-precondition', 'Owner Spotify playlist write request failed.');
+    const code = response.status === 403 ? 'permission-denied' : 'failed-precondition';
+    throw new HttpsError(code, message, {
+      diagnosticId,
+      stage,
+      status: response.status,
+      path,
+      method,
+      spotifyError,
+      requiredScope,
+    });
   }
   return json || {};
 }
@@ -772,6 +998,7 @@ exports.createOwnerMusicMapPlaylist = onCall({
   memory: '256MiB',
   secrets: [spotifyOwnerClientId, spotifyOwnerClientSecret, spotifyOwnerRefreshToken],
 }, async (request) => {
+  const diagnosticId = buildDiagnosticId('owner-music-map-playlist');
   const rawTracks = Array.isArray(request.data?.tracks) ? request.data.tracks : [];
   const tracks = rawTracks
     .map(normalizeOwnerPlaylistInputTrack)
@@ -783,62 +1010,196 @@ exports.createOwnerMusicMapPlaylist = onCall({
   }
 
   const usedUris = new Set();
-  const uris = tracks
-    .map((track) => track.spotifyUri)
-    .filter((uri) => {
-      if (!uri || usedUris.has(uri)) return false;
-      usedUris.add(uri);
-      return true;
-    });
+  const uniqueTracks = [];
+  for (const track of tracks) {
+    if (!track.spotifyUri || usedUris.has(track.spotifyUri)) {
+      continue;
+    }
+    usedUris.add(track.spotifyUri);
+    uniqueTracks.push(track);
+  }
+  const uris = uniqueTracks.map((track) => track.spotifyUri);
 
   if (!uris.length) {
     throw new HttpsError('invalid-argument', 'Valid Spotify track URIs are required.');
   }
 
-  const accessToken = await getOwnerSpotifyUserAccessToken();
-  const ownerProfile = await ownerSpotifyJSONRequest('/v1/me', accessToken);
-  const ownerId = firstString(ownerProfile || {}, ['id']);
-  if (!ownerId) {
-    throw new HttpsError('failed-precondition', 'Owner Spotify profile request failed.');
-  }
-
+  let tokenInfo = null;
+  let ownerProfile = null;
+  let playlist = null;
+  let playlistId = '';
+  let playlistVisibility = '';
   const playlistName = buildOwnerMusicMapPlaylistName(request.data?.playlistName);
-  const playlist = await ownerSpotifyWriteRequest(
-    `/v1/users/${encodeURIComponent(ownerId)}/playlists`,
-    accessToken,
-    {
-      method: 'POST',
-      body: {
-        name: playlistName,
-        public: true,
-        collaborative: false,
-        description: 'NOWHERE Music Map recording playlist',
-      },
+  try {
+    tokenInfo = await getOwnerSpotifyUserAccessToken({ forceRefresh: true });
+    ownerProfile = await ownerSpotifyJSONRequestStrict('/v1/me', tokenInfo.accessToken, {
+      diagnosticId,
+      stage: 'owner-profile',
+    });
+    const ownerId = firstString(ownerProfile || {}, ['id']);
+    if (!ownerId) {
+      throw new HttpsError('failed-precondition', 'Owner Spotify profile request failed.', {
+        diagnosticId,
+        stage: 'owner-profile',
+      });
     }
-  );
-  const playlistId = firstString(playlist, ['id']);
-  if (!playlistId) {
-    throw new HttpsError('failed-precondition', 'Owner Spotify playlist creation failed.');
-  }
 
-  await ownerSpotifyWriteRequest(
-    `/v1/playlists/${encodeURIComponent(playlistId)}/tracks`,
-    accessToken,
-    {
-      method: 'POST',
-      body: {
-        uris,
-        position: 0,
-      },
+    await writeOwnerPlaylistDiagnostic({
+      diagnosticId,
+      status: 'started',
+      stage: 'before-create-playlist',
+      ownerSpotifyUserId: ownerId,
+      ownerSpotifyDisplayName: cleanText(ownerProfile.display_name, 160),
+      tokenScopes: tokenInfo.scopes || [],
+      spotifyReturnedScopes: tokenInfo.spotifyReturnedScopes || [],
+      tokenScopesKnown: Boolean(tokenInfo.scopesKnown),
+      tokenFromCache: Boolean(tokenInfo.fromCache),
+      playlistName,
+      trackCount: uris.length,
+      firstTrackUri: uris[0] || '',
+    });
+
+    const createAttempts = getOwnerPlaylistCreateAttempts(tokenInfo.scopes || []);
+    if (!createAttempts.length) {
+      throw new HttpsError(
+        'failed-precondition',
+        `Owner Spotify refresh token에 ${getOwnerPlaylistRequiredScopeText()} 권한이 없습니다.`,
+        {
+          diagnosticId,
+          stage: 'owner-token-scope',
+          tokenScopes: tokenInfo.scopes || [],
+          spotifyReturnedScopes: tokenInfo.spotifyReturnedScopes || [],
+          requiredScopes: OWNER_PLAYLIST_WRITE_SCOPES,
+        }
+      );
     }
-  );
+
+    let lastCreateError = null;
+    for (const attempt of createAttempts) {
+      try {
+        playlist = await ownerSpotifyWriteRequest(
+          '/v1/me/playlists',
+          tokenInfo.accessToken,
+          {
+            method: 'POST',
+            stage: attempt.stage,
+            diagnosticId,
+            requiredScope: attempt.requiredScope,
+            body: {
+              name: playlistName,
+              public: attempt.isPublic,
+              collaborative: false,
+              description: 'NOWHERE Music Map recording playlist',
+            },
+          }
+        );
+        playlistVisibility = attempt.visibility;
+        break;
+      } catch (error) {
+        lastCreateError = error;
+        const status = error?.details?.status;
+        logger.warn('Owner Spotify playlist create attempt failed', {
+          diagnosticId,
+          stage: attempt.stage,
+          visibility: attempt.visibility,
+          status,
+          message: error?.message || String(error),
+        });
+        if (status !== 403 || attempt === createAttempts[createAttempts.length - 1]) {
+          throw error;
+        }
+      }
+    }
+
+    if (!playlist && lastCreateError) {
+      throw lastCreateError;
+    }
+    playlistId = firstString(playlist, ['id']);
+    if (!playlistId) {
+      throw new HttpsError('failed-precondition', 'Owner Spotify playlist creation returned no playlist id.', {
+        diagnosticId,
+        stage: playlistVisibility ? `create-${playlistVisibility}-playlist` : 'create-playlist',
+      });
+    }
+
+    await ownerSpotifyWriteRequest(
+      `/v1/playlists/${encodeURIComponent(playlistId)}/items`,
+      tokenInfo.accessToken,
+      {
+        method: 'POST',
+        stage: 'add-playlist-tracks',
+        diagnosticId,
+        requiredScope: playlistVisibility === 'public'
+          ? OWNER_PLAYLIST_PUBLIC_SCOPE
+          : OWNER_PLAYLIST_PRIVATE_SCOPE,
+        body: {
+          uris,
+          position: 0,
+        },
+      }
+    );
+  } catch (error) {
+    const details = error?.details || {};
+    const stage = details.stage || 'unknown';
+    await writeOwnerPlaylistDiagnostic({
+      diagnosticId,
+      status: 'failed',
+      stage,
+      ownerSpotifyUserId: firstString(ownerProfile || {}, ['id']),
+      ownerSpotifyDisplayName: cleanText(ownerProfile?.display_name, 160),
+      tokenScopes: tokenInfo?.scopes || [],
+      spotifyReturnedScopes: tokenInfo?.spotifyReturnedScopes || [],
+      tokenScopesKnown: Boolean(tokenInfo?.scopesKnown),
+      tokenFromCache: Boolean(tokenInfo?.fromCache),
+      playlistName,
+      playlistVisibility,
+      playlistId,
+      trackCount: uris.length,
+      firstTrackUri: uris[0] || '',
+      spotifyStatus: details.status || null,
+      spotifyPath: details.path || '',
+      spotifyMethod: details.method || '',
+      spotifyError: details.spotifyError || null,
+      requiredScope: details.requiredScope || getOwnerPlaylistRequiredScopeText(),
+      errorMessage: cleanText(error?.message || String(error), 1000),
+    });
+    throw new HttpsError(
+      error instanceof HttpsError ? error.code : 'failed-precondition',
+      `${error?.message || 'Owner Spotify playlist 생성에 실패했습니다.'} [diagnosticId: ${diagnosticId}, stage: ${stage}]`,
+      {
+        ...details,
+        diagnosticId,
+        stage,
+        tokenScopes: tokenInfo?.scopes || [],
+        spotifyReturnedScopes: tokenInfo?.spotifyReturnedScopes || [],
+        tokenScopesKnown: Boolean(tokenInfo?.scopesKnown),
+        ownerSpotifyUserId: firstString(ownerProfile || {}, ['id']),
+      }
+    );
+  }
 
   const spotifyUri = firstString(playlist, ['uri']) || `spotify:playlist:${playlistId}`;
   const externalUrl = playlist?.external_urls?.spotify
     || `https://open.spotify.com/playlist/${encodeURIComponent(playlistId)}`;
 
   logger.info('Owner Music Map Spotify playlist created.', {
+    diagnosticId,
     playlistId,
+    playlistVisibility,
+    trackCount: uris.length,
+  });
+  await writeOwnerPlaylistDiagnostic({
+    diagnosticId,
+    status: 'success',
+    stage: 'complete',
+    ownerSpotifyUserId: firstString(ownerProfile || {}, ['id']),
+    ownerSpotifyDisplayName: cleanText(ownerProfile?.display_name, 160),
+    tokenScopes: tokenInfo?.scopes || [],
+    spotifyReturnedScopes: tokenInfo?.spotifyReturnedScopes || [],
+    tokenScopesKnown: Boolean(tokenInfo?.scopesKnown),
+    playlistId,
+    playlistVisibility,
+    spotifyPlaylistUrl: externalUrl,
     trackCount: uris.length,
   });
 
@@ -850,7 +1211,8 @@ exports.createOwnerMusicMapPlaylist = onCall({
     spotifyUri,
     spotifyPlaylistId: playlistId,
     spotifyPlaylistUrl: externalUrl,
-    tracks: tracks.map((track) => ({
+    playlistVisibility,
+    tracks: uniqueTracks.map((track) => ({
       ...track,
       spotifyContextUri: spotifyUri,
     })),

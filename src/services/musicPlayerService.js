@@ -1,6 +1,7 @@
 import { Linking, Platform } from 'react-native';
 import NativeNowherePlayer, {
   addPlaybackStateListener,
+  addScreenStateListener,
   isNativeNowherePlayerAvailable,
 } from 'nowhere-player';
 import { API_KEYS } from '../constants';
@@ -9,10 +10,10 @@ import { callCloudFunctionOptionalAuth } from './firebaseService';
 const DEFAULT_COLOR = '#7CFFB2';
 const STOPPED_STATUS = 'stopped';
 const EXTERNAL_PLAYBACK_MAX_AGE_MS = 3 * 60 * 60 * 1000;
+const SPOTIFY_RETURN_DELAY_MS = 1400;
 const USER_SPOTIFY_READ_SCOPES = [
+  'app-remote-control',
   'user-read-currently-playing',
-  'playlist-read-private',
-  'playlist-read-collaborative',
 ];
 let externalPlaybackSnapshot = null;
 
@@ -23,11 +24,26 @@ function getProvider() {
   return 'mock';
 }
 
+function getReturnToNowhereUri() {
+  return API_KEYS.SPOTIFY.redirectUri || 'com.nowhere.nowhere://spotify-auth';
+}
+
+function scheduleReturnToNowhere() {
+  const returnUri = getReturnToNowhereUri();
+  if (!returnUri || Platform.OS === 'web') {
+    return;
+  }
+  setTimeout(() => {
+    Linking.openURL(returnUri).catch(() => null);
+  }, SPOTIFY_RETURN_DELAY_MS);
+}
+
 function getNativeOptions(extraOptions = {}) {
   return {
     provider: getProvider(),
     spotifyClientId: API_KEYS.SPOTIFY.clientId,
     spotifyRedirectUri: API_KEYS.SPOTIFY.redirectUri,
+    returnToAppUri: getReturnToNowhereUri(),
     scopes: USER_SPOTIFY_READ_SCOPES,
     ...extraOptions,
   };
@@ -48,6 +64,7 @@ function normalizeTrack(track = {}) {
     spotifyUri: track.spotifyUri || (typeof track.uri === 'string' && track.uri.startsWith('spotify:') ? track.uri : ''),
     uri: track.uri || '',
     spotifyContextUri: track.spotifyContextUri || track.contextUri || '',
+    spotifyUrl: track.spotifyUrl || track.externalUrl || '',
     spotifyPlaylistUrl: track.spotifyPlaylistUrl || '',
     spotifyStartUrl: track.spotifyStartUrl || '',
     trackCount: track.trackCount || 0,
@@ -152,6 +169,11 @@ function getSpotifyOpenUri(track = {}) {
   return uri.startsWith('spotify:') ? uri : '';
 }
 
+function getSpotifyOpenUrl(track = {}) {
+  const url = String(track.spotifyUrl || track.externalUrl || '').trim();
+  return url.startsWith('https://open.spotify.com/') ? url : '';
+}
+
 function getSpotifyTrackIdFromUri(uri = '') {
   const value = String(uri || '').trim();
   if (value.startsWith('spotify:track:')) {
@@ -192,25 +214,46 @@ function isSpotifyControlBlockedError(error) {
 }
 
 async function openSpotifyUriFallback(track, queue = []) {
-  const uri = track.spotifyStartUrl || getSpotifyContextOpenUrl(track) || getSpotifyOpenUri(track) || track.spotifyPlaylistUrl;
+  const uri = track.spotifyStartUrl || getSpotifyContextOpenUrl(track) || getSpotifyOpenUri(track) || getSpotifyOpenUrl(track) || track.spotifyPlaylistUrl;
   if (!uri) {
     throw buildReconnectionRequiredError();
   }
 
-  try {
-    await Linking.openURL(uri);
-  } catch (error) {
-    const webUrl = getSpotifyWebUrlFromUri(uri);
-    if (!webUrl) {
-      throw error;
+  if (isNativeNowherePlayerAvailable && NativeNowherePlayer.openSpotifyUrlAsync) {
+    try {
+      await NativeNowherePlayer.openSpotifyUrlAsync(uri, getNativeOptions({
+        skipAuthorization: true,
+      }));
+    } catch (nativeError) {
+      try {
+        await Linking.openURL(uri);
+      } catch (error) {
+        const webUrl = getSpotifyWebUrlFromUri(uri);
+        if (!webUrl) {
+          throw nativeError;
+        }
+        await Linking.openURL(webUrl);
+      }
+      scheduleReturnToNowhere();
     }
-    await Linking.openURL(webUrl);
+  } else {
+    try {
+      await Linking.openURL(uri);
+    } catch (error) {
+      const webUrl = getSpotifyWebUrlFromUri(uri);
+      if (!webUrl) {
+        throw error;
+      }
+      await Linking.openURL(webUrl);
+    }
+    scheduleReturnToNowhere();
   }
   const snapshot = setExternalPlaybackSnapshot(track, queue, 'playing');
   return mergeNativeState({
     provider: 'spotify',
     available: true,
     isConnected: false,
+    authorizationStatus: 'sequentialUrl',
     isPlaying: true,
     playbackStatus: 'playing',
     currentTrack: snapshot?.track || normalizeTrack(track),
@@ -277,6 +320,10 @@ export const musicPlayerService = {
 
   addPlaybackStateListener(listener) {
     return this.subscribeState(listener);
+  },
+
+  subscribeScreenState(listener) {
+    return addScreenStateListener((state) => listener?.(state));
   },
 
   async configure() {
@@ -506,6 +553,23 @@ export const musicPlayerService = {
     clearExternalPlaybackSnapshot();
     if (!isNativeNowherePlayerAvailable) return mergeNativeState({ provider: 'mock', available: false, isPlaying: false, playbackStatus: STOPPED_STATUS, currentTrack: null, queue: [] });
     return mergeNativeState(await NativeNowherePlayer.stopAsync());
+  },
+
+  async clearAuthorization() {
+    clearExternalPlaybackSnapshot();
+    if (!isNativeNowherePlayerAvailable || !NativeNowherePlayer.clearAuthorizationAsync) {
+      return mergeNativeState({
+        provider: getProvider(),
+        available: isNativeNowherePlayerAvailable,
+        isPlaying: false,
+        playbackStatus: STOPPED_STATUS,
+        currentTrack: null,
+        queue: [],
+        authorizationStatus: 'notDetermined',
+        isAuthorized: false,
+      });
+    }
+    return mergeNativeState(await NativeNowherePlayer.clearAuthorizationAsync());
   },
 
   async skipNext() {

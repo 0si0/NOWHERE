@@ -20,6 +20,8 @@ import ChallengePanel from '../components/ChallengePanel';
 import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
 import { clearRecommendationCache, getChallengeRecommendation, getRecommendationSlots } from '../services/recommendationService';
 import { getWeatherMoodLabel } from '../services/weatherService';
+import { resetOnboardingState } from '../services/onboardingService';
+import { clearSpotifyAccessRequestStatus, signOutNowhereAccount } from '../services/firebaseService';
 
 const EMPTY_MARK = require('../../assets/EmptyMark.png');
 const CHALLENGE_MARK = require('../../assets/ChallengeMark.png');
@@ -327,7 +329,7 @@ function MarqueeText({ children, style, containerStyle }) {
 }
 
 export default function HomeScreen({ navigation }) {
-  const { play, openInSpotify, currentTrack, playerStatus } = useContext(PlayerContext);
+  const { play, openInSpotify, currentTrack, playerStatus, clearAuthorization } = useContext(PlayerContext);
   const {
     location,
     placeName,
@@ -349,6 +351,7 @@ export default function HomeScreen({ navigation }) {
   const [selectedTrackIndex, setSelectedTrackIndex] = useState(0);
   const [recommendationSlots, setRecommendationSlots] = useState(INITIAL_RECOMMENDATION_SLOTS);
   const [isLoadingRecommendations, setIsLoadingRecommendations] = useState(true);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [likedTrackId, setLikedTrackId] = useState('');
   const [likeFeedback, setLikeFeedback] = useState('');
   const recommendationRefreshInFlightRef = useRef(false);
@@ -735,6 +738,43 @@ export default function HomeScreen({ navigation }) {
     });
   };
 
+  const resetSessionToStart = async () => {
+    setIsLoggingOut(true);
+    try {
+      await setAutoPlayModeEnabled(false).catch(() => null);
+      await clearAuthorization?.().catch(() => null);
+      await clearSpotifyAccessRequestStatus().catch(() => null);
+      if (authUser?.uid) {
+        await signOutNowhereAccount().catch(() => null);
+      }
+      await resetOnboardingState();
+    } finally {
+      setIsLoggingOut(false);
+    }
+  };
+
+  const handleLogoutPress = () => {
+    if (isLoggingOut) {
+      return;
+    }
+    Alert.alert(
+      '로그아웃',
+      '메인 화면과 권한 요청을 처음부터 다시 진행할 수 있도록 초기화할까요?',
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '로그아웃',
+          style: 'destructive',
+          onPress: () => {
+            resetSessionToStart().catch((error) => {
+              Alert.alert('로그아웃 실패', error.message || '초기화에 실패했습니다.');
+            });
+          },
+        },
+      ]
+    );
+  };
+
   return (
     <View style={styles.container}>
       <View style={styles.backdrop} />
@@ -742,16 +782,26 @@ export default function HomeScreen({ navigation }) {
         <View style={[styles.screenContent, { paddingHorizontal: sideInset }]}>
           <View style={styles.topBar}>
             <Text style={[styles.logo, isCompact && styles.logoCompact]}>NOWHERE</Text>
-            <TouchableOpacity
-              style={[styles.autoPlayToggle, isAutoPlayVisibleOn && styles.autoPlayToggleActive]}
-              activeOpacity={0.82}
-              onPress={handleToggleAutoPlayMode}
-            >
-              <View style={[styles.autoPlayDot, isAutoPlayVisibleOn && styles.autoPlayDotActive]} />
-              <Text style={[styles.autoPlayToggleText, isAutoPlayVisibleOn && styles.autoPlayToggleTextActive]}>
-                {isAutoPlayVisibleOn ? 'AUTO ON' : 'AUTO OFF'}
-              </Text>
-            </TouchableOpacity>
+            <View style={styles.topActions}>
+              <TouchableOpacity
+                style={[styles.autoPlayToggle, isAutoPlayVisibleOn && styles.autoPlayToggleActive]}
+                activeOpacity={0.82}
+                onPress={handleToggleAutoPlayMode}
+              >
+                <View style={[styles.autoPlayDot, isAutoPlayVisibleOn && styles.autoPlayDotActive]} />
+                <Text style={[styles.autoPlayToggleText, isAutoPlayVisibleOn && styles.autoPlayToggleTextActive]}>
+                  {isAutoPlayVisibleOn ? 'AUTO ON' : 'AUTO OFF'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.logoutButton, isLoggingOut && styles.logoutButtonDisabled]}
+                activeOpacity={0.78}
+                disabled={isLoggingOut}
+                onPress={handleLogoutPress}
+              >
+                <Text style={styles.logoutButtonText}>{isLoggingOut ? '...' : '로그아웃'}</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           <View style={styles.contextRow}>
@@ -900,6 +950,13 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: 18,
   },
+  topActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 7,
+    flexShrink: 0,
+  },
   logo: {
     color: UI.text,
     fontSize: 23,
@@ -943,6 +1000,25 @@ const styles = StyleSheet.create({
   },
   autoPlayToggleTextActive: {
     color: UI.green,
+  },
+  logoutButton: {
+    minWidth: 54,
+    height: 28,
+    paddingHorizontal: 8,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 201, 184, 0.24)',
+    backgroundColor: 'rgba(18, 17, 17, 0.52)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoutButtonDisabled: {
+    opacity: 0.55,
+  },
+  logoutButtonText: {
+    color: 'rgba(255, 241, 236, 0.72)',
+    fontSize: 10,
+    fontWeight: '800',
   },
   contextRow: {
     flexDirection: 'row',

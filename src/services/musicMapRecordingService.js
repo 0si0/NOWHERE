@@ -26,6 +26,12 @@ const SESSION_IDLE_WRITE_INTERVAL_MS = 15000;
 const DEFAULT_TRACK_DURATION_MS = 180000;
 const MIN_TRACK_DURATION_MS = 30000;
 const MAX_TRACK_PLAYLIST_ITEMS = 10;
+export const MUSIC_MAP_RECORDING_MODES = {
+  SPOTIFY_NOW_PLAYING: 'spotifyNowPlaying',
+  SEQUENTIAL_URL: 'sequentialUrl',
+  MANUAL: 'manual',
+  SPOTIFY_SHARE: 'spotifyShare',
+};
 let recordInFlight = false;
 const sessionListeners = new Set();
 
@@ -51,6 +57,7 @@ function getTrackKey(track = {}) {
     track.id,
     track.spotifyUri,
     track.uri,
+    track.spotifyUrl,
     track.title,
     track.artist,
   ].filter(Boolean).join(':');
@@ -73,7 +80,7 @@ function buildRecordId(prefix, track = {}, recordedAt = new Date().toISOString()
 function hasValidTrack(track = {}) {
   return track &&
     track.type !== 'playlist' &&
-    (track.title || track.id || track.spotifyUri || track.uri);
+    (track.title || track.id || track.spotifyUri || track.uri || track.spotifyUrl);
 }
 
 function normalizePlaylistTrack(track = {}) {
@@ -95,6 +102,7 @@ function normalizePlaylistTrack(track = {}) {
     color: track.albumColor || track.color || getAlbumColor(track),
     spotifyUri: track.spotifyUri || track.uri || '',
     uri: track.spotifyUri || track.uri || '',
+    spotifyUrl: track.spotifyUrl || track.externalUrl || '',
     durationMs: Math.max(MIN_TRACK_DURATION_MS, Number(track.durationMs || 0) || DEFAULT_TRACK_DURATION_MS),
   };
 }
@@ -152,7 +160,7 @@ function getAlbumColor(track = {}) {
 
 function getTrackSummary(track = {}, albumColor = getAlbumColor(track)) {
   return {
-    trackId: track.trackId || track.id || track.spotifyUri || track.uri || '',
+    trackId: track.trackId || track.id || track.spotifyUri || track.uri || track.spotifyUrl || '',
     trackKey: track.trackKey || getTrackKey(track),
     trackName: track.trackName || track.title || 'Unknown Track',
     artistName: track.artistName || track.artist || '',
@@ -163,7 +171,7 @@ function getTrackSummary(track = {}, albumColor = getAlbumColor(track)) {
 }
 
 function getTrackIdentity(track = {}) {
-  const trackId = track.trackId || track.id || track.spotifyUri || track.uri || '';
+  const trackId = track.trackId || track.id || track.spotifyUri || track.uri || track.spotifyUrl || '';
   if (trackId) return `id:${trackId}`;
   const trackKey = track.trackKey || getTrackKey(track);
   if (trackKey) return `key:${trackKey}`;
@@ -606,6 +614,7 @@ export async function startMusicMapRecordingSession({
   initialPlaybackState = null,
   trackPlaylist = [],
   playlist = null,
+  recordingMode = MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL,
 } = {}) {
   await AsyncStorage.removeItem(MUSIC_MAP_STOPPING_KEY);
   await clearSegmentSaveLocks();
@@ -613,7 +622,12 @@ export async function startMusicMapRecordingSession({
   const now = new Date().toISOString();
   const point = normalizeCoords(coords);
   const normalizedPlaylist = normalizeTrackPlaylist(trackPlaylist);
-  const firstPlaylistTrack = normalizedPlaylist[0] || null;
+  const mode = Object.values(MUSIC_MAP_RECORDING_MODES).includes(recordingMode)
+    ? recordingMode
+    : MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL;
+  const firstPlaylistTrack = mode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL
+    ? normalizedPlaylist[0] || null
+    : null;
   const track = firstPlaylistTrack || (hasValidTrack(initialTrack) ? initialTrack : null);
   const initialRoutePoint = point ? buildRoutePoint(point, 0) : null;
   const currentSegment = track && initialRoutePoint ? buildSegment(track, initialRoutePoint, now, placeName, 0, 0) : null;
@@ -626,19 +640,19 @@ export async function startMusicMapRecordingSession({
     recordingStartedAt: now,
     lastUpdatedAt: now,
     playlistId: playlist?.id || '',
-    spotifyPlaylistId: playlist?.spotifyPlaylistId || '',
-    spotifyPlaylistUrl: playlist?.spotifyPlaylistUrl || '',
-    spotifyPlaylistUri: playlist?.spotifyUri || '',
-    recordingMode: 'ownerPlaylist',
+    spotifyPlaylistId: '',
+    spotifyPlaylistUrl: '',
+    spotifyPlaylistUri: '',
+    recordingMode: mode,
     trackPlaylist: normalizedPlaylist,
     playlistMode: normalizedPlaylist.length > 0 ? 'internal-track-playlist' : '',
     currentSegment,
     lastPlaybackState: initialPlaybackState || (track ? sanitizePlaybackState({
       isPlaying: true,
       currentTrack: track,
-      playbackStatus: 'playing',
+      playbackStatus: mode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL ? 'playlist-timeline' : 'playing',
       isAuthorized: true,
-      authorizationStatus: 'authorized',
+      authorizationStatus: mode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL ? 'internal-playlist' : 'authorized',
     }, Date.now()) : null),
     savedSegmentKeys: [],
     startLocation: point,
@@ -692,6 +706,7 @@ export async function recordCurrentMusicMapPlayback({
   placeName = '',
   allowPlaybackPolling = false,
   playbackState = null,
+  source = 'foreground',
 } = {}) {
   if (recordInFlight) {
     return { recorded: false, reason: 'busy' };
@@ -706,6 +721,11 @@ export async function recordCurrentMusicMapPlayback({
     const session = await readSession();
     if (!session?.isActive) {
       return { recorded: false, reason: 'inactive' };
+    }
+
+    const recordingMode = session.recordingMode || MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL;
+    if (source === 'background' && recordingMode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL) {
+      return { recorded: false, reason: 'background-sequential-url-not-supported' };
     }
 
     const pointCoords = normalizeCoords(coords);
@@ -725,7 +745,8 @@ export async function recordCurrentMusicMapPlayback({
     }
 
     const elapsedMs = getElapsedMs(session, nowMs);
-    const playlistSnapshot = getPlaylistTrackAtElapsed(session, elapsedMs);
+    const shouldUsePlaylistTimeline = recordingMode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL;
+    const playlistSnapshot = shouldUsePlaylistTimeline ? getPlaylistTrackAtElapsed(session, elapsedMs) : null;
     let effectivePlaybackState = playlistSnapshot?.track
       ? sanitizePlaybackState({
         isPlaying: true,
@@ -736,7 +757,7 @@ export async function recordCurrentMusicMapPlayback({
       }, nowMs)
       : getCachedPlaybackState(session, nowMs);
     const externalPlaybackState = playbackState ? sanitizePlaybackState(playbackState, nowMs) : null;
-    if (!playlistSnapshot?.track && externalPlaybackState?.track) {
+    if (!shouldUsePlaylistTimeline && externalPlaybackState?.track) {
       effectivePlaybackState = externalPlaybackState;
       session.lastPlaybackState = effectivePlaybackState;
     }

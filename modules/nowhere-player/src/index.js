@@ -12,4 +12,18 @@ export function addPlaybackStateListener(listener) {
   return emitter.addListener('onPlaybackStateChanged', listener);
 }
 
+export function addScreenStateListener(listener) {
+  if (!emitter) {
+    return { remove() {} };
+  }
+  return emitter.addListener('onScreenStateChanged', listener);
+}
+
+export function addPlaybackNotificationPressedListener(listener) {
+  if (!emitter) {
+    return { remove() {} };
+  }
+  return emitter.addListener('onPlaybackNotificationPressed', listener);
+}
+
 export default NativeNowherePlayer;

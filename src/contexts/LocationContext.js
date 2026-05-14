@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { createContext, useState, useEffect, useCallback, useContext, useRef } from 'react';
-import { AppState, Platform } from 'react-native';
+import { AppState, Linking, Platform } from 'react-native';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import { PlayerContext } from './PlayerContext';
@@ -26,12 +26,24 @@ import {
 import { musicPlayerService } from '../services/musicPlayerService';
 import {
   getMusicMapRecordingSession,
+  MUSIC_MAP_RECORDING_MODES,
   recordCurrentMusicMapPlayback,
   startMusicMapRecordingSession,
   stopMusicMapRecordingSession,
   subscribeMusicMapRecordingSession,
 } from '../services/musicMapRecordingService';
-import { startMusicMapTrackPlaylistPlayback } from '../services/musicMapPlaylistPlaybackService';
+import {
+  startMusicMapTrackPlaylistPlayback,
+  stopMusicMapTrackPlaylistPlayback,
+} from '../services/musicMapPlaylistPlaybackService';
+import {
+  cancelMusicMapSequentialPlaybackNotifications,
+  consumeMusicMapPlaybackNotificationUrl,
+  getInitialMusicMapPlaybackNotificationUrl,
+  requestMusicMapPlaybackNotificationPermission,
+  scheduleMusicMapSequentialPlaybackNotifications,
+  subscribeMusicMapPlaybackNotificationPress,
+} from '../services/musicMapNotificationService';
 import { getCurrentWeather, isWeatherConfigured } from '../services/weatherService';
 import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
 
@@ -49,6 +61,21 @@ const AUTOPLAY_PLACE_REFRESH_INTERVAL_MS = 60 * 1000;
 const LOCATION_STATE_MIN_DISTANCE_M = 5;
 const LOCATION_STATE_MIN_INTERVAL_MS = 10000;
 const MUSIC_MAP_STATIONARY_POLL_INTERVAL_MS = 12000;
+
+function isAutoPlayPreparedState(state = {}) {
+  const playbackStatus = String(state?.playbackStatus || state?.status || '').trim();
+  return Boolean(
+    state &&
+    state.provider === 'spotify' &&
+    state.available !== false &&
+    ['openedSpotify', 'playing', 'preparingAutoPlay'].includes(playbackStatus)
+  );
+}
+
+function hasSpotifyPlaybackUri(track = {}) {
+  const uri = String(track?.spotifyUri || track?.uri || track?.spotifyUrl || track?.spotifyStartUrl || track?.spotifyPlaylistUrl || '').trim();
+  return uri.startsWith('spotify:') || uri.startsWith('https://open.spotify.com/');
+}
 
 function serializeError(error) {
   return error?.message || '위치 정보를 가져오는 중 문제가 발생했습니다.';
@@ -215,17 +242,38 @@ async function tryBackgroundAutoPlay(place, source) {
   }
 
   try {
-    await musicPlayerService.playInBackground(target, [target]);
+    const playbackTarget = await resolveAutoPlayPlaybackTarget(target);
+    const trackToPlay = playbackTarget?.track || target;
+    const queueToPlay = playbackTarget?.queue?.length ? playbackTarget.queue : [trackToPlay];
+    if (!hasSpotifyPlaybackUri(trackToPlay)) {
+      throw new Error('자동재생할 Spotify URI가 없습니다.');
+    }
+    await musicPlayerService.playInBackground(trackToPlay, queueToPlay);
     await markAutoPlayTriggered(place.id);
   } catch (error) {
+    await writeAutoPlayModeEnabled(false).catch(() => {});
     await writePendingAutoPlay(place, source);
   }
 }
 
 async function tryBackgroundMusicMapRecord(coords) {
+  const session = await getMusicMapRecordingSession().catch(() => null);
+  if (!session?.isActive) {
+    return;
+  }
+  if ((session.recordingMode || MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL) === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL) {
+    return;
+  }
+
+  const playbackState = session.recordingMode === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING
+    ? await musicPlayerService.getState().catch(() => null)
+    : null;
+
   await recordCurrentMusicMapPlayback({
     coords,
-    allowPlaybackPolling: false,
+    allowPlaybackPolling: session.recordingMode === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING,
+    playbackState,
+    source: 'background',
   }).catch(() => {});
 }
 
@@ -353,22 +401,29 @@ export function LocationProvider({ children }) {
   }, []);
 
   const recordMusicMapPlaybackAndSync = useCallback(async (coords, placeNameValue = '') => {
-    if (!musicMapRecordingRef.current?.isActive) {
+    const activeSession = musicMapRecordingRef.current;
+    if (!activeSession?.isActive) {
       return { recorded: false, reason: 'inactive' };
     }
 
     const cachedPlayer = playerRef.current;
-    const result = await recordCurrentMusicMapPlayback({
-      coords,
-      placeName: placeNameValue,
-      allowPlaybackPolling: false,
-      playbackState: cachedPlayer?.playerState || {
+    const recordingMode = activeSession.recordingMode || MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL;
+    const shouldReadSpotifyState = recordingMode === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING;
+    const playbackState = shouldReadSpotifyState && typeof cachedPlayer?.getState === 'function'
+      ? await cachedPlayer.getState().catch(() => null)
+      : {
         currentTrack: cachedPlayer?.currentTrack || null,
         isPlaying: Boolean(cachedPlayer?.isPlaying),
         playbackStatus: cachedPlayer?.playerStatus?.playbackStatus || '',
         authorizationStatus: cachedPlayer?.playerStatus?.authorizationStatus || '',
         isAuthorized: Boolean(cachedPlayer?.playerStatus?.isAuthorized),
-      },
+      };
+    const result = await recordCurrentMusicMapPlayback({
+      coords,
+      placeName: placeNameValue,
+      allowPlaybackPolling: shouldReadSpotifyState,
+      playbackState,
+      source: 'foreground',
     }).catch(() => null);
     if (result?.session) {
       const nextSession = {
@@ -536,6 +591,10 @@ export function LocationProvider({ children }) {
       const playAndRecordTrack = async (nextTrack, nextQueue = []) => {
         const nextTrackToPlay = nextTrack || trackToPlay;
         const nextQueueToPlay = nextQueue?.length ? nextQueue : [nextTrackToPlay];
+        if (!hasSpotifyPlaybackUri(nextTrackToPlay)) {
+          throw new Error('자동재생할 Spotify URI가 없습니다.');
+        }
+
         let playbackState;
         if (playerRef.current?.playInBackground) {
           playbackState = await playerRef.current.playInBackground(nextTrackToPlay, nextQueueToPlay);
@@ -592,6 +651,9 @@ export function LocationProvider({ children }) {
 
       return place;
     } catch (error) {
+      await writeAutoPlayModeEnabled(false).catch(() => {});
+      autoPlayModeEnabledRef.current = false;
+      setAutoPlayModeEnabledState(false);
       setAutoPlayStatus({ status: 'error', place, error: error.message || '자동재생에 실패했습니다.' });
       return null;
     } finally {
@@ -771,10 +833,9 @@ export function LocationProvider({ children }) {
 
     await refreshLocation({ forceWeather: true });
 
-    const hasFullLocationPermission = nextForeground === 'granted' && nextBackground === 'granted';
-    await writeAutoPlayModeEnabled(hasFullLocationPermission);
-    autoPlayModeEnabledRef.current = hasFullLocationPermission;
-    setAutoPlayModeEnabledState(hasFullLocationPermission);
+    await writeAutoPlayModeEnabled(false);
+    autoPlayModeEnabledRef.current = false;
+    setAutoPlayModeEnabledState(false);
 
     return {
       foreground: nextForeground,
@@ -899,8 +960,25 @@ export function LocationProvider({ children }) {
     const places = await refreshAutoPlayPlaces({ force: true }).catch(() => readCachedAutoPlayPlaces());
     const primerPlace = places.find((place) => getSavedPlacePlayTarget(place));
     const primerTarget = primerPlace ? getSavedPlacePlayTarget(primerPlace) : null;
+    if (!primerTarget) {
+      await setAutoPlayModeEnabled(false);
+      throw new Error('AUTO ON을 준비하려면 먼저 자동재생 장소와 재생할 Spotify 곡을 저장해주세요.');
+    }
+    if (!hasSpotifyPlaybackUri(primerTarget)) {
+      await setAutoPlayModeEnabled(false);
+      throw new Error('AUTO ON을 준비하려면 Spotify URI가 저장된 자동재생 곡이 필요합니다.');
+    }
+
     const state = await playerRef.current?.prepareAutoPlay?.(primerTarget);
-    await setAutoPlayModeEnabled(true);
+    if (!isAutoPlayPreparedState(state)) {
+      await setAutoPlayModeEnabled(false);
+      throw new Error('Spotify 실행 상태를 확인하지 못했습니다. AUTO는 OFF로 유지합니다.');
+    }
+
+    const enabled = await setAutoPlayModeEnabled(true);
+    if (!enabled) {
+      throw new Error('백그라운드 위치 권한이 없어 AUTO를 켤 수 없습니다.');
+    }
     return state;
   }, [refreshAutoPlayPlaces, setAutoPlayModeEnabled]);
 
@@ -927,17 +1005,112 @@ export function LocationProvider({ children }) {
     return true;
   }, [stopGeofenceRegions]);
 
-  const startMusicMapRecording = useCallback(async ({ trackPlaylist = [], playlist = null } = {}) => {
+  const recordMusicMapPlaybackNow = useCallback(async () => {
+    const coords = locationRef.current;
+    if (!coords) {
+      return { recorded: false, reason: 'missing-location' };
+    }
+    return recordMusicMapPlaybackAndSync(coords, placeNameRef.current?.name || '');
+  }, [recordMusicMapPlaybackAndSync]);
+
+  const handleMusicMapPlaybackNotificationUrl = useCallback(async (url = '') => {
+    const payload = await consumeMusicMapPlaybackNotificationUrl(url);
+    if (!payload?.track) {
+      return false;
+    }
+
+    const openSpotify = playerRef.current?.openInSpotify || musicPlayerService.openInSpotify;
+    const trackWithoutContext = {
+      ...payload.track,
+      spotifyContextUri: '',
+      contextUri: '',
+    };
+    const queueWithoutContext = (payload.queue?.length ? payload.queue : [payload.track]).map((queuedTrack) => ({
+      ...queuedTrack,
+      spotifyContextUri: '',
+      contextUri: '',
+    }));
+
+    await openSpotify(trackWithoutContext, queueWithoutContext);
+    await recordMusicMapPlaybackNow().catch(() => null);
+    return true;
+  }, [recordMusicMapPlaybackNow]);
+
+  useEffect(() => {
+    let mounted = true;
+    const handleUrl = (url) => {
+      if (!url) {
+        return;
+      }
+      handleMusicMapPlaybackNotificationUrl(url).catch((error) => {
+        if (mounted) {
+          setLocationError(error?.message || 'Spotify에서 다음 곡을 여는 데 실패했어요.');
+        }
+      });
+    };
+
+    const linkingSubscription = Linking.addEventListener('url', (event) => {
+      handleUrl(event.url);
+    });
+    const notificationSubscription = subscribeMusicMapPlaybackNotificationPress(handleUrl);
+    getInitialMusicMapPlaybackNotificationUrl()
+      .then(handleUrl)
+      .catch(() => null);
+
+    return () => {
+      mounted = false;
+      linkingSubscription.remove();
+      notificationSubscription.remove();
+    };
+  }, [handleMusicMapPlaybackNotificationUrl]);
+
+  const startMusicMapRecording = useCallback(async ({
+    trackPlaylist = [],
+    playlist = null,
+    recordingMode = MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL,
+  } = {}) => {
     const actionToken = musicMapActionTokenRef.current + 1;
     musicMapActionTokenRef.current = actionToken;
     musicMapStopRequestedRef.current = false;
 
     const playlistTracks = Array.isArray(trackPlaylist) ? trackPlaylist.filter(Boolean) : [];
-    if (playlistTracks.length === 0) {
-      throw new Error('뮤직지도 기록을 시작하려면 트랙 플레이리스트를 먼저 설정해주세요.');
+    const mode = Object.values(MUSIC_MAP_RECORDING_MODES).includes(recordingMode)
+      ? recordingMode
+      : MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL;
+
+    if (mode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL && playlistTracks.length === 0) {
+      throw new Error('플레이리스트에 곡을 먼저 추가해주세요.');
+    }
+
+    if (mode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL && !hasSpotifyPlaybackUri(playlistTracks[0])) {
+      throw new Error('Spotify에서 열 수 있는 곡을 추가해주세요.');
+    }
+
+    if (mode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL) {
+      requestMusicMapPlaybackNotificationPermission().catch(() => {});
     }
 
     if (musicMapStopRequestedRef.current || musicMapActionTokenRef.current !== actionToken) {
+      throw new Error('뮤직지도 기록 시작이 취소되었습니다.');
+    }
+
+    let initialPlaybackState = null;
+    let initialTrack = playlistTracks[0] || null;
+
+    if (mode === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING) {
+      if (playerRef.current?.getState) {
+        initialPlaybackState = await playerRef.current.getState().catch(() => null);
+      } else {
+        initialPlaybackState = await musicPlayerService.getState().catch(() => null);
+      }
+      initialTrack = initialPlaybackState?.currentTrack || null;
+      if (!initialTrack) {
+        throw new Error('아직 고급모드 권한 요청이 허용되지 않았습니다. \n 1~20분 후에 다시 시도해주세요.');
+      }
+    }
+
+    if (musicMapStopRequestedRef.current || musicMapActionTokenRef.current !== actionToken) {
+      stopMusicMapTrackPlaylistPlayback('music-map');
       throw new Error('뮤직지도 기록 시작이 취소되었습니다.');
     }
 
@@ -945,10 +1118,11 @@ export function LocationProvider({ children }) {
       userId: authUser?.uid && !authUser.isAnonymous ? authUser.uid : '',
       coords: locationRef.current,
       placeName: placeNameRef.current?.name || '',
-      initialTrack: playlistTracks[0] || null,
-      initialPlaybackState: null,
+      initialTrack,
+      initialPlaybackState,
       trackPlaylist: playlistTracks,
       playlist,
+      recordingMode: mode,
     });
 
     if (musicMapStopRequestedRef.current || musicMapActionTokenRef.current !== actionToken) {
@@ -960,26 +1134,91 @@ export function LocationProvider({ children }) {
     musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(session);
     setMusicMapRecording(session);
 
-    startBackgroundTracking({ syncPlaces: false, musicMapOnly: true })
-      .then((started) => {
-        if (!started) {
-          setLocationError('백그라운드 위치 권한이 필요합니다.');
+    if (mode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL) {
+      const playSequentialTrack = async (nextTrack, nextQueue = []) => {
+        const nextTrackToPlay = nextTrack || playlistTracks[0];
+        const nextQueueToPlay = nextQueue?.length ? nextQueue : [nextTrackToPlay];
+        if (!hasSpotifyPlaybackUri(nextTrackToPlay)) {
+          throw new Error('Spotify에서 다음 곡을 여는 데 실패했어요.');
         }
-      })
-      .catch((error) => {
-        setLocationError(serializeError(error));
-      });
+        const openSpotify = playerRef.current?.openInSpotify || musicPlayerService.openInSpotify;
+        const trackWithoutContext = { ...nextTrackToPlay, spotifyContextUri: '', contextUri: '' };
+        const queueWithoutContext = nextQueueToPlay.map((queuedTrack) => ({
+          ...queuedTrack,
+          spotifyContextUri: '',
+          contextUri: '',
+        }));
+        let playbackState;
+        try {
+          playbackState = await openSpotify(trackWithoutContext, queueWithoutContext);
+        } catch (error) {
+          throw new Error('Spotify에서 다음 곡을 여는 데 실패했어요.');
+        }
+        await recordMusicMapPlaybackNow();
+        return playbackState;
+      };
+
+      try {
+        await startMusicMapTrackPlaylistPlayback(
+          playlistTracks,
+          playSequentialTrack,
+          (nextError) => {
+            setLocationError(nextError?.message || 'Spotify에서 다음 곡을 여는 데 실패했어요.');
+          },
+          async () => {
+            stopMusicMapTrackPlaylistPlayback('music-map');
+            cancelMusicMapSequentialPlaybackNotifications('music-map').catch(() => {});
+            const stopped = await stopMusicMapRecordingSession().catch(() => null);
+            const stoppedState = stopped || {
+              isActive: false,
+              elapsedMs: 0,
+              maxDurationMs: 60 * 60 * 1000,
+            };
+            musicMapRecordingRef.current = stoppedState;
+            musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(stoppedState);
+            setMusicMapRecording(stoppedState);
+          },
+          'music-map'
+        );
+      } catch (error) {
+        stopMusicMapTrackPlaylistPlayback('music-map');
+        await stopMusicMapRecordingSession().catch(() => {});
+        const stoppedState = {
+          isActive: false,
+          elapsedMs: 0,
+          maxDurationMs: 60 * 60 * 1000,
+        };
+        musicMapRecordingRef.current = stoppedState;
+        musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(stoppedState);
+        setMusicMapRecording(stoppedState);
+        throw error;
+      }
+    }
+
+    if (mode === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING) {
+      startBackgroundTracking({ syncPlaces: false, musicMapOnly: true })
+        .then((started) => {
+          if (!started) {
+            setLocationError('백그라운드 위치 권한이 필요합니다.');
+          }
+        })
+        .catch((error) => {
+          setLocationError(serializeError(error));
+        });
+    }
 
     if (locationRef.current) {
       recordMusicMapPlaybackAndSync(locationRef.current, placeNameRef.current?.name || '');
     }
 
     return session;
-  }, [authUser?.isAnonymous, authUser?.uid, recordMusicMapPlaybackAndSync, startBackgroundTracking]);
+  }, [authUser?.isAnonymous, authUser?.uid, recordMusicMapPlaybackAndSync, recordMusicMapPlaybackNow, startBackgroundTracking]);
 
   const stopMusicMapRecording = useCallback(async () => {
     musicMapStopRequestedRef.current = true;
     musicMapActionTokenRef.current += 1;
+    stopMusicMapTrackPlaylistPlayback('music-map');
+    cancelMusicMapSequentialPlaybackNotifications('music-map').catch(() => {});
     const stoppedState = {
       isActive: false,
       elapsedMs: 0,
@@ -1021,14 +1260,46 @@ export function LocationProvider({ children }) {
   }, [stopBackgroundTracking]);
 
   useEffect(() => {
+    const subscription = musicPlayerService.subscribeScreenState?.((event = {}) => {
+      const screenState = String(event.state || '').toLowerCase();
+      if (!['off', 'locked'].includes(screenState)) {
+        return;
+      }
+
+      const activeSession = musicMapRecordingRef.current;
+      const recordingMode = activeSession?.recordingMode || MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL;
+      if (!activeSession?.isActive || recordingMode !== MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL) {
+        return;
+      }
+
+      const trackPlaylist = Array.isArray(activeSession.trackPlaylist) ? activeSession.trackPlaylist : [];
+      const recordingStartedAtMs = new Date(activeSession.recordingStartedAt || activeSession.startedAt || Date.now()).getTime();
+      const elapsedMs = Number.isFinite(recordingStartedAtMs) ? Math.max(0, Date.now() - recordingStartedAtMs) : 0;
+
+      stopMusicMapRecording()
+        .then(() => {
+          scheduleMusicMapSequentialPlaybackNotifications(trackPlaylist, {
+            channel: 'music-map',
+            elapsedMs,
+          }).catch(() => {});
+          setLocationError('화면이 꺼져 일반모드 뮤직지도 기록이 중단됐습니다.');
+        })
+        .catch((error) => {
+          setLocationError(serializeError(error));
+        });
+    });
+
+    return () => subscription?.remove?.();
+  }, [stopMusicMapRecording]);
+
+  useEffect(() => {
     let subscription;
 
     const bootstrap = async () => {
-      const [cachedLocation, cachedPlaceName, cachedWeather, savedAutoPlayMode, savedMusicMapSession] = await Promise.all([
+      const [cachedLocation, cachedPlaceName, cachedWeather, savedMusicMapSession] = await Promise.all([
         readLocationCache(),
         readPlaceNameCache(),
         readWeatherCache(),
-        readAutoPlayModeEnabled(),
         getMusicMapRecordingSession(),
       ]);
 
@@ -1050,15 +1321,14 @@ export function LocationProvider({ children }) {
 
       const permissions = await refreshPermissions();
       const hasAlwaysPermission = permissions.hasBackgroundPermission;
-      const shouldAutoEnable = permissions.hasForegroundPermission && permissions.hasBackgroundPermission;
       musicMapRecordingRef.current = savedMusicMapSession;
       musicMapRecordingSignatureRef.current = getMusicMapSessionSignature(savedMusicMapSession);
       setMusicMapRecording(savedMusicMapSession);
       if (!autoPlayColdStartOffAppliedRef.current) {
         autoPlayColdStartOffAppliedRef.current = true;
-        await writeAutoPlayModeEnabled(shouldAutoEnable);
-        autoPlayModeEnabledRef.current = shouldAutoEnable;
-        setAutoPlayModeEnabledState(shouldAutoEnable);
+        await writeAutoPlayModeEnabled(false);
+        autoPlayModeEnabledRef.current = false;
+        setAutoPlayModeEnabledState(false);
       }
 
       if (Platform.OS !== 'web') {
@@ -1066,10 +1336,15 @@ export function LocationProvider({ children }) {
         if (!hasAlwaysPermission && isRegistered) {
           await stopBackgroundTracking();
           isRegistered = false;
-        } else if (hasAlwaysPermission && (savedMusicMapSession.isActive || shouldAutoEnable || savedAutoPlayMode) && !isRegistered) {
+        } else if (
+          hasAlwaysPermission &&
+          savedMusicMapSession.isActive &&
+          savedMusicMapSession.recordingMode === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING &&
+          !isRegistered
+        ) {
           await startBackgroundTracking({
-            syncPlaces: Boolean(shouldAutoEnable || savedAutoPlayMode),
-            musicMapOnly: Boolean(savedMusicMapSession.isActive && !shouldAutoEnable && !savedAutoPlayMode),
+            syncPlaces: false,
+            musicMapOnly: true,
           });
           isRegistered = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
         }
@@ -1119,17 +1394,13 @@ export function LocationProvider({ children }) {
       }
 
       const permissions = await refreshPermissions();
-      const shouldAutoEnable = permissions.hasForegroundPermission && permissions.hasBackgroundPermission;
-      const shouldDisableAutoPlay = !shouldAutoEnable;
+      const shouldDisableAutoPlay = !permissions.hasForegroundPermission || !permissions.hasBackgroundPermission;
       if (shouldDisableAutoPlay) {
         await forceAutoPlayOff();
         if (Platform.OS !== 'web') {
           await stopBackgroundTracking();
         }
-      } else if (Platform.OS !== 'web') {
-        await writeAutoPlayModeEnabled(true);
-        autoPlayModeEnabledRef.current = true;
-        setAutoPlayModeEnabledState(true);
+      } else if (Platform.OS !== 'web' && autoPlayModeEnabledRef.current) {
         const isRegistered = await Location.hasStartedLocationUpdatesAsync(LOCATION_TASK_NAME);
         if (!isRegistered) {
           await startBackgroundTracking({ syncPlaces: true, musicMapOnly: false });
@@ -1204,6 +1475,7 @@ export function LocationProvider({ children }) {
         prepareAutoPlayMode,
         startMusicMapRecording,
         stopMusicMapRecording,
+        recordMusicMapPlaybackNow,
         refreshMusicMapRecording,
         startBackgroundTracking,
         stopBackgroundTracking,

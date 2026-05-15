@@ -1,0 +1,24 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.nowhere.player" >
+4
+5    <uses-sdk android:minSdkVersion="24" />
+6
+7    <uses-permission android:name="android.permission.INTERNET" />
+7-->/Users/ryu/Project/NOWHERE/modules/nowhere-player/android/src/main/AndroidManifest.xml:2:3-64
+7-->/Users/ryu/Project/NOWHERE/modules/nowhere-player/android/src/main/AndroidManifest.xml:2:20-62
+8    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+8-->/Users/ryu/Project/NOWHERE/modules/nowhere-player/android/src/main/AndroidManifest.xml:3:3-74
+8-->/Users/ryu/Project/NOWHERE/modules/nowhere-player/android/src/main/AndroidManifest.xml:3:20-72
+9
+10    <application>
+10-->/Users/ryu/Project/NOWHERE/modules/nowhere-player/android/src/main/AndroidManifest.xml:5:3-9:17
+11        <receiver
+11-->/Users/ryu/Project/NOWHERE/modules/nowhere-player/android/src/main/AndroidManifest.xml:6:5-8:33
+12            android:name="com.nowhere.player.NowherePlaybackNotificationReceiver"
+12-->/Users/ryu/Project/NOWHERE/modules/nowhere-player/android/src/main/AndroidManifest.xml:7:7-58
+13            android:exported="false" />
+13-->/Users/ryu/Project/NOWHERE/modules/nowhere-player/android/src/main/AndroidManifest.xml:8:7-31
+14    </application>
+15
+16</manifest>

@@ -21,9 +21,16 @@
         "NSLocationAlwaysUsageDescription": "NOWHERE uses your location in the background to auto-play music when you arrive at saved places.",
         "NSPhotoLibraryAddUsageDescription": "NOWHERE saves your music diary cards to your photo library.",
         "LSApplicationQueriesSchemes": [
+          "spotify",
           "spotify"
         ],
         "CFBundleURLTypes": [
+          {
+            "CFBundleURLName": "spotify-auth",
+            "CFBundleURLSchemes": [
+              "com.nowhere.nowhere"
+            ]
+          },
           {
             "CFBundleURLName": "spotify-auth",
             "CFBundleURLSchemes": [
@@ -33,8 +40,11 @@
         ],
         "UIBackgroundModes": [
           "location",
+          "audio",
+          "location",
           "audio"
-        ]
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {

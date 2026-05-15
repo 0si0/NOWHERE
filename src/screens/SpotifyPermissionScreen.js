@@ -51,6 +51,22 @@ function getSpotifyConnectMessage(error, fallback = 'Spotify 연결에 실패했
   return error?.message || fallback;
 }
 
+function shouldContinueWithoutSpotify(error) {
+  if (Platform.OS !== 'android') {
+    return false;
+  }
+  const message = String(error?.message || '').toLowerCase();
+  const code = String(error?.code || '').toLowerCase();
+  return Boolean(
+    code.includes('spotify') ||
+    message.includes('spotify') ||
+    message.includes('authentication_service_unavailable') ||
+    message.includes('연결') ||
+    message.includes('권한') ||
+    message.includes('응답이 지연')
+  );
+}
+
 export default function SpotifyPermissionScreen({ onComplete }) {
   const { requestAuthorization, getState } = useContext(PlayerContext);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -129,6 +145,11 @@ export default function SpotifyPermissionScreen({ onComplete }) {
       await markSpotifyOnboardingComplete();
       onComplete?.();
     } catch (nextError) {
+      if (shouldContinueWithoutSpotify(nextError)) {
+        await markSpotifyOnboardingComplete();
+        onComplete?.('android-spotify-deferred');
+        return;
+      }
       setError(getSpotifyConnectMessage(nextError));
     } finally {
       setIsConnecting(false);
@@ -298,6 +319,18 @@ export default function SpotifyPermissionScreen({ onComplete }) {
               </>
             )}
           </TouchableOpacity>
+
+          {Platform.OS === 'android' ? (
+            <TouchableOpacity
+              style={styles.basicModeButton}
+              activeOpacity={0.86}
+              onPress={handleContinueBasicMode}
+              disabled={isConnecting}
+            >
+              <Ionicons name="arrow-forward-outline" size={19} color={UI.peach} />
+              <Text style={styles.basicModeButtonText}>연결 없이 먼저 둘러보기</Text>
+            </TouchableOpacity>
+          ) : null}
 
           {requestMessage ? <Text style={styles.infoText}>{requestMessage}</Text> : null}
           {error ? <Text style={styles.errorText}>{error}</Text> : null}

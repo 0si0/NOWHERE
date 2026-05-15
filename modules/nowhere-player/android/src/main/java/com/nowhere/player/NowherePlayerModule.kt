@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import com.spotify.android.appremote.api.ConnectionParams
 import com.spotify.android.appremote.api.Connector
 import com.spotify.android.appremote.api.SpotifyAppRemote
@@ -20,15 +21,14 @@ import com.spotify.protocol.client.CallResult
 import com.spotify.protocol.client.Subscription
 import com.spotify.protocol.types.Empty
 import com.spotify.protocol.types.PlayerState
-import com.spotify.sdk.android.auth.AuthorizationClient
-import com.spotify.sdk.android.auth.AuthorizationRequest
-import com.spotify.sdk.android.auth.AuthorizationResponse
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.functions.Coroutine
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -36,6 +36,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.security.SecureRandom
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
@@ -46,6 +48,7 @@ class NowherePlayerModule : Module() {
   private var redirectUri: String = "com.nowhere.nowhere://spotify-auth"
   private var returnToAppUri: String = "com.nowhere.nowhere://spotify-auth"
   private var accessToken: String? = null
+  private var refreshToken: String? = null
   private var tokenExpiresAtMs: Long = 0L
   private var spotifyAppRemote: SpotifyAppRemote? = null
   private var playerStateSubscription: Subscription<PlayerState>? = null
@@ -56,10 +59,14 @@ class NowherePlayerModule : Module() {
   private var positionMs: Long = 0L
   private var playbackStatus: String = "idle"
   private var authPromise: Promise? = null
+  private var pendingCodeVerifier: String? = null
+  private var pendingAuthState: String? = null
   private var shouldOpenSpotifyAfterAuth: Boolean = false
   private var pendingAutoPlayPrimerUri: String? = null
   private var requestedScopes: Array<String> = arrayOf("user-read-currently-playing")
   private var screenStateReceiver: BroadcastReceiver? = null
+  private var authCallbackPollRunnable: Runnable? = null
+  private val authCallbackPollHandler = Handler(Looper.getMainLooper())
 
   override fun definition() = ModuleDefinition {
     Name("NowherePlayer")
@@ -75,6 +82,7 @@ class NowherePlayerModule : Module() {
     }
 
     OnDestroy {
+      stopAuthCallbackPolling()
       unregisterScreenStateReceiver()
       playerStateSubscription?.cancel()
       spotifyAppRemote?.let { SpotifyAppRemote.disconnect(it) }
@@ -86,42 +94,16 @@ class NowherePlayerModule : Module() {
         return@OnActivityResult
       }
 
-      val promise = authPromise ?: return@OnActivityResult
-      authPromise = null
+      handleAuthorizationUri(payload.data?.data)
+    }
 
-      val response = AuthorizationClient.getResponse(payload.resultCode, payload.data)
-      when (response.type) {
-        AuthorizationResponse.Type.TOKEN -> {
-          accessToken = response.accessToken
-          tokenExpiresAtMs = System.currentTimeMillis() + response.expiresIn.toLong() * 1000L
-          persistSpotifySession()
-          if (shouldOpenSpotifyAfterAuth) {
-            shouldOpenSpotifyAfterAuth = false
-            playbackStatus = "preparingAutoPlay"
-            launchSpotifyUri(pendingAutoPlayPrimerUri ?: "spotify:", requireSpotifyApp = true)
-            pendingAutoPlayPrimerUri = null
-            emitState()
-          }
-          promise.resolve(
-            mapOf(
-              "provider" to "spotify",
-              "status" to "authorized",
-              "authorized" to true,
-              "expiresIn" to response.expiresIn
-            )
-          )
-        }
-        AuthorizationResponse.Type.ERROR -> {
-          shouldOpenSpotifyAfterAuth = false
-          pendingAutoPlayPrimerUri = null
-          promise.reject("ERR_SPOTIFY_AUTH", response.error ?: "Spotify authorization failed.", null)
-        }
-        else -> {
-          shouldOpenSpotifyAfterAuth = false
-          pendingAutoPlayPrimerUri = null
-          promise.reject("ERR_SPOTIFY_AUTH_CANCELLED", "Spotify authorization was cancelled.", null)
-        }
+    OnNewIntent { intent ->
+      val data = intent.data ?: return@OnNewIntent
+      val expected = Uri.parse(redirectUri)
+      if (data.scheme != expected.scheme || data.host != expected.host) {
+        return@OnNewIntent
       }
+      handleAuthorizationUri(data)
     }
 
     AsyncFunction("configureAsync") { options: Map<String, Any?> ->
@@ -154,12 +136,52 @@ class NowherePlayerModule : Module() {
         return@AsyncFunction
       }
 
-      authPromise = promise
-      val request = AuthorizationRequest.Builder(clientId, AuthorizationResponse.Type.TOKEN, redirectUri)
-        .setScopes(requestedScopes)
-        .setShowDialog(forcePrompt)
-        .build()
-      AuthorizationClient.openLoginActivity(activity, SPOTIFY_AUTH_REQUEST_CODE, request)
+      if (!forcePrompt && !refreshToken.isNullOrBlank()) {
+        CoroutineScope(Dispatchers.IO).launch {
+          try {
+            refreshAccessToken(refreshToken ?: "")
+            resolveAuthorization(promise)
+          } catch (error: Throwable) {
+            accessToken = null
+            tokenExpiresAtMs = 0L
+            persistSpotifySession()
+            runOnMain {
+              startAuthorizationFlow(activity, promise, forcePrompt)
+            }
+          }
+        }
+        return@AsyncFunction
+      }
+
+      startAuthorizationFlow(activity, promise, forcePrompt)
+    }
+
+    AsyncFunction("completeAuthorizationAsync") { callbackUrl: String, options: Map<String, Any?>, promise: Promise ->
+      applyOptions(options)
+      val uri = Uri.parse(callbackUrl)
+      val expected = Uri.parse(redirectUri)
+      if (uri.scheme != expected.scheme || uri.host != expected.host) {
+        promise.reject("ERR_SPOTIFY_AUTH", "Spotify authorization callback URL is invalid.", null)
+        return@AsyncFunction
+      }
+      handleAuthorizationUri(uri, promise)
+    }
+
+    AsyncFunction("completePendingAuthorizationAsync") { options: Map<String, Any?>, promise: Promise ->
+      applyOptions(options)
+      val callbackUrl = spotifyTokenPrefs()?.getString("pendingCallbackUrl", null)
+      if (callbackUrl.isNullOrBlank()) {
+        promise.reject("ERR_SPOTIFY_AUTH_PENDING", "No pending Spotify authorization callback is available.", null)
+        return@AsyncFunction
+      }
+      val uri = Uri.parse(callbackUrl)
+      val expected = Uri.parse(redirectUri)
+      if (uri.scheme != expected.scheme || uri.host != expected.host) {
+        clearPendingCallbackUrl()
+        promise.reject("ERR_SPOTIFY_AUTH", "Spotify authorization callback URL is invalid.", null)
+        return@AsyncFunction
+      }
+      handleAuthorizationUri(uri, promise)
     }
 
     AsyncFunction("connectAsync") { options: Map<String, Any?>, promise: Promise ->
@@ -179,6 +201,7 @@ class NowherePlayerModule : Module() {
 
     AsyncFunction("clearAuthorizationAsync") { promise: Promise ->
       accessToken = null
+      refreshToken = null
       tokenExpiresAtMs = 0L
       spotifyTokenPrefs()?.edit()?.clear()?.apply()
       currentTrack = null
@@ -459,6 +482,15 @@ class NowherePlayerModule : Module() {
     if (accessToken == null) {
       accessToken = prefs.getString("accessToken", null)
     }
+    if (refreshToken == null) {
+      refreshToken = prefs.getString("refreshToken", null)
+    }
+    if (pendingCodeVerifier == null) {
+      pendingCodeVerifier = prefs.getString("pendingCodeVerifier", null)
+    }
+    if (pendingAuthState == null) {
+      pendingAuthState = prefs.getString("pendingAuthState", null)
+    }
     if (tokenExpiresAtMs <= 0L) {
       tokenExpiresAtMs = prefs.getLong("expiresAtMs", 0L)
     }
@@ -472,7 +504,31 @@ class NowherePlayerModule : Module() {
     val prefs = spotifyTokenPrefs() ?: return
     prefs.edit()
       .putString("accessToken", accessToken)
+      .putString("refreshToken", refreshToken)
       .putLong("expiresAtMs", tokenExpiresAtMs)
+      .apply()
+  }
+
+  private fun persistPendingAuthorization() {
+    val prefs = spotifyTokenPrefs() ?: return
+    prefs.edit()
+      .putString("pendingCodeVerifier", pendingCodeVerifier)
+      .putString("pendingAuthState", pendingAuthState)
+      .apply()
+  }
+
+  private fun clearPersistedPendingAuthorization() {
+    val prefs = spotifyTokenPrefs() ?: return
+    prefs.edit()
+      .remove("pendingCodeVerifier")
+      .remove("pendingAuthState")
+      .apply()
+  }
+
+  private fun clearPendingCallbackUrl() {
+    val prefs = spotifyTokenPrefs() ?: return
+    prefs.edit()
+      .remove("pendingCallbackUrl")
       .apply()
   }
 
@@ -483,10 +539,107 @@ class NowherePlayerModule : Module() {
 
   private fun requireValidAccessToken(action: String): String {
     loadPersistedSpotifySession()
+    if (!isAccessTokenValid() && !refreshToken.isNullOrBlank()) {
+      refreshAccessToken(refreshToken ?: "")
+    }
     if (!isAccessTokenValid()) {
       throw IllegalStateException("Spotify authorization is required before $action.")
     }
     return accessToken ?: throw IllegalStateException("Spotify authorization is required before $action.")
+  }
+
+  private fun exchangeCodeForToken(code: String, verifier: String): Int {
+    val json = spotifyTokenRequest(
+      mapOf(
+        "grant_type" to "authorization_code",
+        "code" to code,
+        "redirect_uri" to redirectUri,
+        "client_id" to clientId,
+        "code_verifier" to verifier
+      )
+    )
+    return applyTokenResponse(json)
+  }
+
+  private fun refreshAccessToken(token: String): Int {
+    val json = spotifyTokenRequest(
+      mapOf(
+        "grant_type" to "refresh_token",
+        "refresh_token" to token,
+        "client_id" to clientId
+      )
+    )
+    return applyTokenResponse(json)
+  }
+
+  private fun spotifyTokenRequest(payload: Map<String, String>): JSONObject {
+    val connection = (URL(SPOTIFY_TOKEN_URL).openConnection() as HttpURLConnection).apply {
+      requestMethod = "POST"
+      connectTimeout = 10000
+      readTimeout = 10000
+      doInput = true
+      doOutput = true
+      setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+      setRequestProperty("Accept", "application/json")
+    }
+
+    try {
+      val body = formEncoded(payload).toByteArray(StandardCharsets.UTF_8)
+      connection.outputStream.use { output ->
+        output.write(body)
+      }
+
+      val responseBody = if (connection.responseCode in 200..299) {
+        connection.inputStream.bufferedReader().use { it.readText() }
+      } else {
+        val error = connection.errorStream?.bufferedReader()?.use { it.readText() }
+        throw IllegalStateException(error ?: "Spotify token request failed with HTTP ${connection.responseCode}.")
+      }
+      return JSONObject(responseBody)
+    } finally {
+      connection.disconnect()
+    }
+  }
+
+  private fun applyTokenResponse(json: JSONObject): Int {
+    val nextAccessToken = json.optString("access_token", "")
+    if (nextAccessToken.isBlank()) {
+      throw IllegalStateException("Spotify token response did not include an access token.")
+    }
+    accessToken = nextAccessToken
+    json.optString("refresh_token", "").takeIf { it.isNotBlank() }?.let {
+      refreshToken = it
+    }
+    val expiresIn = json.optInt("expires_in", 3600).coerceAtLeast(1)
+    tokenExpiresAtMs = System.currentTimeMillis() + expiresIn * 1000L
+    persistSpotifySession()
+    return expiresIn
+  }
+
+  private fun formEncoded(payload: Map<String, String>): String =
+    payload.entries.joinToString("&") { (key, value) ->
+      "${urlEncode(key)}=${urlEncode(value)}"
+    }
+
+  private fun urlEncode(value: String): String =
+    URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+
+  private fun randomString(length: Int): String {
+    val characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+    val random = SecureRandom()
+    return (0 until length)
+      .map { characters[random.nextInt(characters.length)] }
+      .joinToString("")
+  }
+
+  private fun codeChallenge(verifier: String): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+      .digest(verifier.toByteArray(StandardCharsets.UTF_8))
+    return Base64.encodeToString(digest, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+  }
+
+  private fun runOnMain(block: () -> Unit) {
+    Handler(Looper.getMainLooper()).post { block() }
   }
 
   private fun connectToSpotify(promise: Promise) {
@@ -503,6 +656,165 @@ class NowherePlayerModule : Module() {
         promise.reject("ERR_SPOTIFY_CONNECT", error.localizedMessage, error)
       }
     )
+  }
+
+  private fun startAuthorizationFlow(activity: Activity, promise: Promise, forcePrompt: Boolean) {
+    val verifier = randomString(64)
+    val state = randomString(24)
+    val scopes = requestedScopes.filter { it.isNotBlank() }.ifEmpty { listOf("user-read-currently-playing") }
+    val authUri = Uri.Builder()
+      .scheme("https")
+      .authority("accounts.spotify.com")
+      .path("/authorize")
+      .appendQueryParameter("client_id", clientId)
+      .appendQueryParameter("response_type", "code")
+      .appendQueryParameter("redirect_uri", redirectUri)
+      .appendQueryParameter("code_challenge_method", "S256")
+      .appendQueryParameter("code_challenge", codeChallenge(verifier))
+      .appendQueryParameter("state", state)
+      .appendQueryParameter("scope", scopes.joinToString(" "))
+      .apply {
+        if (forcePrompt) {
+          appendQueryParameter("show_dialog", "true")
+        }
+      }
+      .build()
+
+    authPromise = promise
+    pendingCodeVerifier = verifier
+    pendingAuthState = state
+    persistPendingAuthorization()
+
+    try {
+      val intent = Intent(Intent.ACTION_VIEW, authUri)
+      activity.startActivity(intent)
+      startAuthCallbackPolling()
+    } catch (error: Throwable) {
+      authPromise = null
+      pendingCodeVerifier = null
+      pendingAuthState = null
+      stopAuthCallbackPolling()
+      clearPersistedPendingAuthorization()
+      promise.reject("ERR_SPOTIFY_AUTH", error.localizedMessage ?: "Spotify authorization could not start.", error)
+    }
+  }
+
+  private fun handleAuthorizationUri(data: Uri?, fallbackPromise: Promise? = null) {
+    val promise = fallbackPromise ?: authPromise ?: return
+    authPromise = null
+    stopAuthCallbackPolling()
+    loadPersistedSpotifySession()
+
+    if (data == null) {
+      clearPendingAuthorization()
+      promise.reject("ERR_SPOTIFY_AUTH_CANCELLED", "Spotify authorization was cancelled.", null)
+      return
+    }
+
+    val returnedState = data.getQueryParameter("state")
+    val expectedState = pendingAuthState
+    if (expectedState.isNullOrBlank() || returnedState != expectedState) {
+      clearPendingAuthorization()
+      promise.reject("ERR_SPOTIFY_AUTH", "Spotify authorization state did not match.", null)
+      return
+    }
+
+    data.getQueryParameter("error")?.let { error ->
+      clearPendingAuthorization()
+      promise.reject("ERR_SPOTIFY_AUTH", error, null)
+      return
+    }
+
+    val code = data.getQueryParameter("code")
+    val verifier = pendingCodeVerifier
+    if (code.isNullOrBlank() || verifier.isNullOrBlank()) {
+      clearPendingAuthorization()
+      promise.reject("ERR_SPOTIFY_AUTH_CANCELLED", "Spotify authorization code was not returned.", null)
+      return
+    }
+
+    pendingCodeVerifier = null
+    pendingAuthState = null
+    clearPersistedPendingAuthorization()
+    clearPendingCallbackUrl()
+    CoroutineScope(Dispatchers.IO).launch {
+      try {
+        val expiresIn = exchangeCodeForToken(code, verifier)
+        resolveAuthorization(promise, expiresIn)
+      } catch (error: Throwable) {
+        rejectAuthorization(promise, error)
+      }
+    }
+  }
+
+  private fun clearPendingAuthorization() {
+    pendingCodeVerifier = null
+    pendingAuthState = null
+    authPromise = null
+    stopAuthCallbackPolling()
+    clearPersistedPendingAuthorization()
+    clearPendingCallbackUrl()
+    shouldOpenSpotifyAfterAuth = false
+    pendingAutoPlayPrimerUri = null
+  }
+
+  private fun startAuthCallbackPolling() {
+    stopAuthCallbackPolling()
+    val startedAtMs = System.currentTimeMillis()
+    val runnable = object : Runnable {
+      override fun run() {
+        if (authPromise == null) {
+          stopAuthCallbackPolling()
+          return
+        }
+
+        val callbackUrl = spotifyTokenPrefs()?.getString("pendingCallbackUrl", null)
+        if (!callbackUrl.isNullOrBlank()) {
+          handleAuthorizationUri(Uri.parse(callbackUrl))
+          return
+        }
+
+        if (System.currentTimeMillis() - startedAtMs < 60_000L) {
+          authCallbackPollHandler.postDelayed(this, 500L)
+        } else {
+          stopAuthCallbackPolling()
+        }
+      }
+    }
+    authCallbackPollRunnable = runnable
+    authCallbackPollHandler.postDelayed(runnable, 500L)
+  }
+
+  private fun stopAuthCallbackPolling() {
+    authCallbackPollRunnable?.let { authCallbackPollHandler.removeCallbacks(it) }
+    authCallbackPollRunnable = null
+  }
+
+  private fun resolveAuthorization(promise: Promise, expiresIn: Int? = null) {
+    runOnMain {
+      if (shouldOpenSpotifyAfterAuth) {
+        shouldOpenSpotifyAfterAuth = false
+        playbackStatus = "preparingAutoPlay"
+        launchSpotifyUri(pendingAutoPlayPrimerUri ?: "spotify:", requireSpotifyApp = true)
+        pendingAutoPlayPrimerUri = null
+        emitState()
+      }
+      promise.resolve(
+        mapOf(
+          "provider" to "spotify",
+          "status" to "authorized",
+          "authorized" to true,
+          "expiresIn" to (expiresIn ?: ((tokenExpiresAtMs - System.currentTimeMillis()) / 1000L).coerceAtLeast(0L))
+        )
+      )
+    }
+  }
+
+  private fun rejectAuthorization(promise: Promise, error: Throwable) {
+    clearPendingAuthorization()
+    runOnMain {
+      promise.reject("ERR_SPOTIFY_AUTH", error.localizedMessage ?: "Spotify authorization failed.", error)
+    }
   }
 
   private fun ensureConnected(onReady: () -> Unit, onError: (Throwable) -> Unit) {
@@ -938,6 +1250,16 @@ class NowherePlayerModule : Module() {
   }
 
   private suspend fun refreshCurrentPlaybackState() = withContext(Dispatchers.IO) {
+    loadPersistedSpotifySession()
+    if (!isAccessTokenValid() && !refreshToken.isNullOrBlank()) {
+      try {
+        refreshAccessToken(refreshToken ?: "")
+      } catch (error: Throwable) {
+        accessToken = null
+        tokenExpiresAtMs = 0L
+        persistSpotifySession()
+      }
+    }
     val token = accessToken ?: run {
       isPlaying = false
       playbackStatus = "notDetermined"
@@ -1258,5 +1580,6 @@ class NowherePlayerModule : Module() {
   companion object {
     private const val SPOTIFY_AUTH_REQUEST_CODE = 4926
     private const val PLAYBACK_NOTIFICATION_PERMISSION_REQUEST_CODE = 4927
+    private const val SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
   }
 }

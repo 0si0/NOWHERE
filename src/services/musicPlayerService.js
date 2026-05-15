@@ -1,4 +1,4 @@
-import { Linking, Platform } from 'react-native';
+import { AppState, Linking, Platform } from 'react-native';
 import NativeNowherePlayer, {
   addPlaybackStateListener,
   addScreenStateListener,
@@ -11,6 +11,7 @@ const DEFAULT_COLOR = '#7CFFB2';
 const STOPPED_STATUS = 'stopped';
 const EXTERNAL_PLAYBACK_MAX_AGE_MS = 3 * 60 * 60 * 1000;
 const SPOTIFY_RETURN_DELAYS_MS = [1800, 4200, 7200];
+const ANDROID_SPOTIFY_AUTH_TIMEOUT_MS = 15000;
 const USER_SPOTIFY_READ_SCOPES = [
   'app-remote-control',
   'user-read-currently-playing',
@@ -49,6 +50,120 @@ function getNativeOptions(extraOptions = {}) {
     scopes: USER_SPOTIFY_READ_SCOPES,
     ...extraOptions,
   };
+}
+
+function isSpotifyAuthCallbackUrl(url = '') {
+  const callbackUrl = String(url || '');
+  const redirectUri = API_KEYS.SPOTIFY.redirectUri || 'com.nowhere.nowhere://spotify-auth';
+  return Boolean(callbackUrl && redirectUri && callbackUrl.startsWith(redirectUri));
+}
+
+function requestAndroidSpotifyAuthorization(extraOptions = {}) {
+  const nativeOptions = getNativeOptions(extraOptions);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let completionTimer = null;
+    let timeoutTimer = null;
+    let urlSubscription = null;
+    let appStateSubscription = null;
+
+    const cleanup = () => {
+      if (completionTimer) {
+        clearTimeout(completionTimer);
+      }
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+      }
+      urlSubscription?.remove?.();
+      appStateSubscription?.remove?.();
+    };
+
+    const finish = (callback, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      callback(value);
+    };
+
+    const resolveIfAuthorized = async () => {
+      const state = await NativeNowherePlayer.getStateAsync().catch(() => null);
+      if (isAuthorizedState(state)) {
+        finish(resolve, {
+          provider: 'spotify',
+          status: 'authorized',
+          authorized: true,
+          ...state,
+        });
+        return true;
+      }
+      return false;
+    };
+
+    const completeFromUrl = (url) => {
+      if (!isSpotifyAuthCallbackUrl(url) || settled || completionTimer) {
+        return;
+      }
+      completionTimer = setTimeout(async () => {
+        completionTimer = null;
+        if (settled) {
+          return;
+        }
+        try {
+          const result = await NativeNowherePlayer.completeAuthorizationAsync(url, nativeOptions);
+          finish(resolve, result);
+        } catch (error) {
+          const recovered = await resolveIfAuthorized();
+          if (!recovered) {
+            finish(reject, error);
+          }
+        }
+      }, 900);
+    };
+
+    const completeFromNativePendingCallback = async () => {
+      if (settled || completionTimer || !NativeNowherePlayer.completePendingAuthorizationAsync) {
+        return;
+      }
+      completionTimer = setTimeout(async () => {
+        completionTimer = null;
+        if (settled) {
+          return;
+        }
+        try {
+          const result = await NativeNowherePlayer.completePendingAuthorizationAsync(nativeOptions);
+          finish(resolve, result);
+        } catch (error) {
+          const recovered = await resolveIfAuthorized();
+          if (!recovered && error?.code !== 'ERR_SPOTIFY_AUTH_PENDING') {
+            finish(reject, error);
+          }
+        }
+      }, 900);
+    };
+
+    urlSubscription = Linking.addEventListener('url', ({ url }) => completeFromUrl(url));
+    appStateSubscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        Linking.getInitialURL().then(completeFromUrl).catch(() => null);
+        completeFromNativePendingCallback();
+      }
+    });
+    Linking.getInitialURL().then(completeFromUrl).catch(() => null);
+    completeFromNativePendingCallback();
+
+    NativeNowherePlayer.requestAuthorizationAsync(nativeOptions)
+      .then((result) => finish(resolve, result))
+      .catch((error) => finish(reject, error));
+
+    timeoutTimer = setTimeout(async () => {
+      const recovered = await resolveIfAuthorized();
+      if (!recovered) {
+        finish(reject, new Error('Spotify 연결 응답이 지연되고 있습니다. 앱을 완전히 종료한 뒤 다시 시도해주세요.'));
+      }
+    }, ANDROID_SPOTIFY_AUTH_TIMEOUT_MS);
+  });
 }
 
 function normalizeTrack(track = {}) {
@@ -212,7 +327,11 @@ function isSpotifyControlBlockedError(error) {
     message.includes('forbidden') ||
     message.includes('허용하지 않았') ||
     message.includes('premium') ||
-    message.includes('재연결이 필요');
+    message.includes('재연결이 필요') ||
+    message.includes('explicit user authorization') ||
+    message.includes('auth-flow') ||
+    message.includes('usernotauthorized') ||
+    message.includes('authenticationfailed');
 }
 
 async function openSpotifyUriFallback(track, queue = []) {
@@ -346,6 +465,10 @@ export const musicPlayerService = {
       return { provider: 'spotify', authorized: false, status: 'missingClientId' };
     }
 
+    if (Platform.OS === 'android' && NativeNowherePlayer.completeAuthorizationAsync) {
+      return requestAndroidSpotifyAuthorization(extraOptions);
+    }
+
     return NativeNowherePlayer.requestAuthorizationAsync(getNativeOptions(extraOptions));
   },
 
@@ -460,6 +583,10 @@ export const musicPlayerService = {
   async play(track, queue = []) {
     const requestedQueue = normalizeQueue(queue.length ? queue : [track]);
     const normalizedTrack = normalizeTrack(track);
+
+    if (Platform.OS === 'android') {
+      return openSpotifyUriFallback(normalizedTrack, requestedQueue);
+    }
 
     if (normalizedTrack.spotifyContextUri) {
       return openSpotifyUriFallback(normalizedTrack, requestedQueue);

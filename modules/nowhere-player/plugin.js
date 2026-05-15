@@ -75,10 +75,22 @@ function withNowherePlayer(config, props = {}) {
     manifest.queries = ensureArray(manifest.queries);
     const queries = manifest.queries[0] || {};
     queries.package = ensureArray(queries.package);
+    queries.intent = ensureArray(queries.intent);
 
     const hasSpotifyQuery = queries.package.some((item) => item.$?.['android:name'] === SPOTIFY_PACKAGE);
     if (!hasSpotifyQuery) {
       queries.package.push({ $: { 'android:name': SPOTIFY_PACKAGE } });
+    }
+    const hasSpotifyUriQuery = queries.intent.some((item) => (
+      ensureArray(item.action).some((action) => action.$?.['android:name'] === 'android.intent.action.VIEW') &&
+      ensureArray(item.data).some((data) => data.$?.['android:scheme'] === 'spotify')
+    ));
+    if (!hasSpotifyUriQuery) {
+      queries.intent.push({
+        action: [{ $: { 'android:name': 'android.intent.action.VIEW' } }],
+        category: [{ $: { 'android:name': 'android.intent.category.BROWSABLE' } }],
+        data: [{ $: { 'android:scheme': 'spotify' } }],
+      });
     }
     manifest.queries[0] = queries;
 

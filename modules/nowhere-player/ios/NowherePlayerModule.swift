@@ -307,6 +307,7 @@ public final class NowherePlayerModule: Module, @unchecked Sendable {
       await self.refreshPlayerState()
       return self.currentState()
     }
+
   }
 
   private func applyOptions(_ options: [String: Any]) {

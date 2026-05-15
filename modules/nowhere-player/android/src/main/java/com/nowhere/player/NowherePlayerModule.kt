@@ -422,7 +422,7 @@ class NowherePlayerModule : Module() {
       callPlayer(promise) { it.seekTo(positionMs.toLong().coerceAtLeast(0L)) }
     }
 
-    AsyncFunction("getStateAsync") Coroutine {
+    AsyncFunction("getStateAsync") Coroutine { ->
       refreshCurrentPlaybackState()
       return@Coroutine currentState()
     }
@@ -576,7 +576,8 @@ class NowherePlayerModule : Module() {
 
   private fun subscribeToPlayerState(remote: SpotifyAppRemote) {
     playerStateSubscription?.cancel()
-    playerStateSubscription = remote.playerApi.subscribeToPlayerState()
+    val subscription = remote.playerApi.subscribeToPlayerState()
+    subscription
       .setEventCallback { state ->
         updateFromPlayerState(state)
         emitState()
@@ -587,6 +588,7 @@ class NowherePlayerModule : Module() {
           currentState() + mapOf("error" to (error.localizedMessage ?: "Spotify player state error."))
         )
       }
+    playerStateSubscription = subscription
   }
 
   private fun callPlayer(

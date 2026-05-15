@@ -1,4 +1,4 @@
-import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -15,6 +15,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import KakaoPlacePicker from '../components/KakaoPlacePicker';
+import SpotlightGuide from '../components/SpotlightGuide';
+import useSpotlightGuide from '../hooks/useSpotlightGuide';
 import { API_KEYS, MAX_AUTOPLAY_PLACES, RADIUS_OPTIONS } from '../constants';
 import { LocationContext } from '../contexts/LocationContext';
 import { useSession } from '../contexts/SessionContext';
@@ -25,8 +27,8 @@ import {
   saveSavedPlace,
   updateSavedPlace,
 } from '../services/firebaseService';
-import { loadMusicMapTrackPlaylists } from '../services/musicMapPlaylistService';
 import { musicPlayerService } from '../services/musicPlayerService';
+import { SPOTLIGHT_GUIDE_KEYS } from '../services/spotlightGuideService';
 
 const EMPTY_ARTWORK = require('../../assets/EmptyMark.png');
 const DEFAULT_MAP_CENTER = {
@@ -110,21 +112,6 @@ function normalizePlayTargetForForm(track = {}) {
   };
 }
 
-function normalizeInternalPlaylistForForm(playlist = {}) {
-  const tracks = Array.isArray(playlist.tracks) ? playlist.tracks.filter(Boolean) : [];
-  const firstTrack = tracks[0] || {};
-  return normalizePlayTargetForForm({
-    type: 'playlist',
-    provider: 'nowhere',
-    id: playlist.id,
-    title: playlist.name || '뮤직지도 플레이리스트',
-    ownerName: 'NOWHERE',
-    artworkUrl: firstTrack.artworkUrl || firstTrack.albumArtUrl || '',
-    trackCount: tracks.length,
-    tracks,
-  });
-}
-
 function TrackArtwork({ track, size = 48 }) {
   const source = track?.artworkUrl ? { uri: track.artworkUrl } : EMPTY_ARTWORK;
   return <Image source={source} style={{ width: size, height: size, borderRadius: 10 }} />;
@@ -164,7 +151,7 @@ function SavedPlaceCard({ place, onLoad, onDelete }) {
         <View style={styles.savedPlaceInfo}>
           <Text style={styles.savedPlaceTitle} numberOfLines={1}>{place.name}</Text>
           <Text style={styles.savedPlaceSub} numberOfLines={1}>{label}</Text>
-          <Text style={styles.savedPlaceMeta}>{place.radiusMeters}m 반경에서 자동재생</Text>
+          <Text style={styles.savedPlaceMeta}>{place.radiusMeters}m 반경에서 자동 알림</Text>
         </View>
       </View>
       <Text style={styles.savedPlaceMeta}>업데이트 {formatTimestamp(place.updatedAt)}</Text>
@@ -204,20 +191,42 @@ export default function PlaceSetupScreen({ navigation }) {
   const [selectedCoordinates, setSelectedCoordinates] = useState(currentOrDefaultCoords);
   const [selectedRadius, setSelectedRadius] = useState(50);
   const [selectedTrack, setSelectedTrack] = useState(null);
-  const [targetMode, setTargetMode] = useState('track');
   const [trackQuery, setTrackQuery] = useState('');
   const [trackResults, setTrackResults] = useState([]);
   const [isSearchingTracks, setIsSearchingTracks] = useState(false);
-  const [isLoadingPlaylists, setIsLoadingPlaylists] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingSavedPlaces, setIsLoadingSavedPlaces] = useState(false);
   const [savedPlaces, setSavedPlaces] = useState([]);
   const [editingPlaceId, setEditingPlaceId] = useState(null);
+  const placeGuideRef = useRef(null);
+  const trackGuideRef = useRef(null);
+  const saveGuideRef = useRef(null);
+  const { visible: isPlaceGuideVisible, finish: finishPlaceGuide } = useSpotlightGuide(SPOTLIGHT_GUIDE_KEYS.placeAlert);
 
   const activePlaces = useMemo(
     () => savedPlaces.filter((place) => place.status !== 'archived'),
     [savedPlaces]
   );
+  const placeGuideSteps = useMemo(() => [
+    {
+      targetRef: placeGuideRef,
+      title: '장소에서 음악 재생하기',
+      description: '여기서는 내가 듣고 싶은 노래를 원하는 장소에서 틀 수 있어요. 먼저 장소를 선택해주세요.',
+      placement: 'bottom',
+    },
+    {
+      targetRef: trackGuideRef,
+      title: '노래 선택하기',
+      description: '장소에 도착했을 때 열고 싶은 노래를 검색해서 선택하세요.',
+      placement: 'top',
+    },
+    {
+      targetRef: saveGuideRef,
+      title: '알림 설정 저장',
+      description: '장소와 노래를 저장한 뒤, 꼭 알림 설정을 ON으로 해야 해요.',
+      placement: 'top',
+    },
+  ], []);
 
   const resolveOwnerId = useCallback(async () => {
     if (!isFirebaseConfigured || authUser?.isAnonymous) {
@@ -248,7 +257,6 @@ export default function PlaceSetupScreen({ navigation }) {
     setPlaceName('');
     setSelectedRadius(50);
     setSelectedTrack(null);
-    setTargetMode('track');
     setTrackQuery('');
     setTrackResults([]);
     setSelectedCoordinates(currentOrDefaultCoords);
@@ -280,7 +288,7 @@ export default function PlaceSetupScreen({ navigation }) {
       return;
     }
     Alert.alert(
-      '자동재생 장소 삭제',
+      '장소 알림 삭제',
       `"${place.name || '저장된 장소'}"를 삭제할까요?`,
       [
         { text: '취소', style: 'cancel' },
@@ -323,29 +331,6 @@ export default function PlaceSetupScreen({ navigation }) {
       Alert.alert('Spotify 검색 실패', getSpotifyDataMessage(error, 'Spotify 곡 검색에 실패했습니다.'));
     } finally {
       setIsSearchingTracks(false);
-    }
-  };
-
-  const handleLoadPlaylists = async () => {
-    try {
-      setIsLoadingPlaylists(true);
-      const playlists = await loadMusicMapTrackPlaylists();
-      const normalizedPlaylists = playlists
-        .filter((playlist) => Array.isArray(playlist.tracks) && playlist.tracks.length > 0)
-        .map(normalizeInternalPlaylistForForm)
-        .filter(Boolean);
-      setTargetMode('playlist');
-      setTrackResults(normalizedPlaylists);
-      if (normalizedPlaylists.length === 0) {
-        Alert.alert('플레이리스트 없음', '뮤직지도에서 먼저 트랙 플레이리스트를 만들어주세요.');
-      }
-    } catch (error) {
-      Alert.alert(
-        '플레이리스트 가져오기 실패',
-        error.message || '뮤직지도 플레이리스트를 불러오지 못했습니다.'
-      );
-    } finally {
-      setIsLoadingPlaylists(false);
     }
   };
 
@@ -407,7 +392,7 @@ export default function PlaceSetupScreen({ navigation }) {
     }
 
     if (!selectedCoordinates) {
-      Alert.alert('장소를 선택해주세요', '지도에서 자동재생할 장소를 먼저 선택해야 합니다.');
+      Alert.alert('장소를 선택해주세요', '지도에서 장소를 먼저 선택해야 합니다.');
       return;
     }
 
@@ -417,7 +402,7 @@ export default function PlaceSetupScreen({ navigation }) {
     }
 
     if (!editingPlaceId && activePlaces.length >= MAX_AUTOPLAY_PLACES) {
-      Alert.alert('저장 제한', `자동재생 장소는 한 사람당 최대 ${MAX_AUTOPLAY_PLACES}개까지 저장할 수 있습니다.`);
+      Alert.alert('저장 제한', `장소는 한 사람당 최대 ${MAX_AUTOPLAY_PLACES}개까지 저장할 수 있습니다.`);
       return;
     }
 
@@ -480,7 +465,7 @@ export default function PlaceSetupScreen({ navigation }) {
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
           <Text style={styles.backText}>←</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>장소 자동재생</Text>
+        <Text style={styles.title}>장소 알림 설정</Text>
         <View style={{ width: 40 }} />
       </View>
 
@@ -489,111 +474,82 @@ export default function PlaceSetupScreen({ navigation }) {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 12 : 0}
       >
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.scroll}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
-      >
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>1. 장소 선택</Text>
-          </View>
-          <KakaoPlacePicker
-            apiKey={API_KEYS.KAKAO_MAPS}
-            baseUrl={API_KEYS.KAKAO_MAPS_BASE_URL}
-            center={selectedCoordinates}
-            radiusMeters={selectedRadius}
-            onSelect={setSelectedCoordinates}
-            onMoveToCurrentLocation={handleSelectCurrentLocation}
-          />
-          <View style={styles.permissionRow}>
-            {!hasForegroundPermission && (
-              <TouchableOpacity style={styles.permissionButton} onPress={handleRequestLocation} disabled={isLocating}>
-                <Text style={styles.permissionButtonText}>{isLocating ? '확인 중...' : '위치 권한 허용'}</Text>
-              </TouchableOpacity>
-            )}
-            {hasForegroundPermission && !backgroundTrackingEnabled && (
-              <TouchableOpacity style={styles.permissionGhostButton} onPress={handleEnableBackground}>
-                <Text style={styles.permissionGhostButtonText}>
-                  {hasBackgroundPermission ? '백그라운드 감지 시작' : '백그라운드 권한 요청'}
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-          {locationError ? <Text style={styles.errorText}>{locationError}</Text> : null}
-        </View>
-
-        {!isFirebaseConfigured && (
-          <View style={styles.localModeBanner}>
-            <Text style={styles.localModeTitle}>로컬 저장 모드</Text>
-            <Text style={styles.localModeText}>
-              Firebase 설정 전까지 저장한 장소는 이 기기 안에만 임시 저장됩니다.
-            </Text>
-            <Text style={styles.localModeHint}>
-              아직 비어 있는 Firebase 키: {missingConfigKeys.join(', ')}
-            </Text>
-          </View>
-        )}
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>2. 장소 이름과 반경</Text>
-          <TextInput
-            value={placeName}
-            onChangeText={setPlaceName}
-            placeholder="예: 성수동 카페, 학교 정문, 퇴근 버스정류장"
-            placeholderTextColor={UI.textMuted}
-            style={styles.input}
-          />
-          <View style={styles.radiusRow}>
-            {RADIUS_OPTIONS.map((radius) => (
-              <TouchableOpacity
-                key={radius}
-                onPress={() => setSelectedRadius(radius)}
-                style={[styles.radiusBtn, selectedRadius === radius && styles.radiusBtnActive]}
-              >
-                <Text style={[styles.radiusBtnText, selectedRadius === radius && styles.radiusBtnTextActive]}>
-                  {radius}m
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>3. 자동재생 음악 선택</Text>
-          <View style={styles.modeRow}>
-            <TouchableOpacity
-              style={[styles.modeButton, targetMode === 'track' && styles.modeButtonActive]}
-              onPress={() => {
-                setTargetMode('track');
-                setTrackResults([]);
-              }}
-            >
-              <Ionicons
-                name="musical-notes-outline"
-                size={16}
-                color={targetMode === 'track' ? UI.text : UI.textMuted}
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+        >
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>1. 장소 선택</Text>
+            </View>
+            <View ref={placeGuideRef}>
+              <KakaoPlacePicker
+                apiKey={API_KEYS.KAKAO_MAPS}
+                baseUrl={API_KEYS.KAKAO_MAPS_BASE_URL}
+                center={selectedCoordinates}
+                radiusMeters={selectedRadius}
+                onSelect={setSelectedCoordinates}
+                onMoveToCurrentLocation={handleSelectCurrentLocation}
               />
-              <Text style={[styles.modeButtonText, targetMode === 'track' && styles.modeButtonTextActive]}>곡 검색</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.modeButton, targetMode === 'playlist' && styles.modeButtonActive]}
-              onPress={handleLoadPlaylists}
-              disabled={isLoadingPlaylists}
-            >
-              <Ionicons
-                name="list-outline"
-                size={18}
-                color={targetMode === 'playlist' ? UI.text : UI.textMuted}
-              />
-              <Text style={[styles.modeButtonText, targetMode === 'playlist' && styles.modeButtonTextActive]}>
-                {isLoadingPlaylists ? '불러오는 중' : '내 플레이리스트'}
+            </View>
+            <View style={styles.permissionRow}>
+              {!hasForegroundPermission && (
+                <TouchableOpacity style={styles.permissionButton} onPress={handleRequestLocation} disabled={isLocating}>
+                  <Text style={styles.permissionButtonText}>{isLocating ? '확인 중...' : '위치 권한 허용'}</Text>
+                </TouchableOpacity>
+              )}
+              {hasForegroundPermission && !backgroundTrackingEnabled && (
+                <TouchableOpacity style={styles.permissionGhostButton} onPress={handleEnableBackground}>
+                  <Text style={styles.permissionGhostButtonText}>
+                    {hasBackgroundPermission ? '백그라운드 감지 시작' : '백그라운드 권한 요청'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+            {locationError ? <Text style={styles.errorText}>{locationError}</Text> : null}
+          </View>
+
+          {!isFirebaseConfigured && (
+            <View style={styles.localModeBanner}>
+              <Text style={styles.localModeTitle}>로컬 저장 모드</Text>
+              <Text style={styles.localModeText}>
+                Firebase 설정 전까지 저장한 장소는 이 기기 안에만 임시 저장됩니다.
               </Text>
-            </TouchableOpacity>
+              <Text style={styles.localModeHint}>
+                아직 비어 있는 Firebase 키: {missingConfigKeys.join(', ')}
+              </Text>
+            </View>
+          )}
+
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>2. 장소 이름과 반경</Text>
+            <TextInput
+              value={placeName}
+              onChangeText={setPlaceName}
+              placeholder="예: 성수동 카페, 학교 정문, 퇴근 버스정류장"
+              placeholderTextColor={UI.textMuted}
+              style={styles.input}
+            />
+            <View style={styles.radiusRow}>
+              {RADIUS_OPTIONS.map((radius) => (
+                <TouchableOpacity
+                  key={radius}
+                  onPress={() => setSelectedRadius(radius)}
+                  style={[styles.radiusBtn, selectedRadius === radius && styles.radiusBtnActive]}
+                >
+                  <Text style={[styles.radiusBtnText, selectedRadius === radius && styles.radiusBtnTextActive]}>
+                    {radius}m
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
           </View>
-          {targetMode === 'track' && (
-            <View style={styles.searchRow}>
+
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>3. 여기에서 듣고 싶은 음악 선택</Text>
+            <View ref={trackGuideRef} style={styles.searchRow}>
               <TextInput
                 value={trackQuery}
                 onChangeText={setTrackQuery}
@@ -612,86 +568,91 @@ export default function PlaceSetupScreen({ navigation }) {
                 <Text style={styles.searchButtonText}>{isSearchingTracks ? '검색중' : '검색'}</Text>
               </TouchableOpacity>
             </View>
-          )}
 
-          {selectedTrack ? (
-            <View style={styles.selectedTrackBox}>
-              <TrackArtwork track={selectedTrack} size={54} />
-              <View style={styles.trackTextBox}>
-                <Text style={styles.selectedLabel}>
-                  선택된 자동재생 {selectedTrack.type === 'playlist' ? '플레이리스트' : '곡'}
-                </Text>
-                <Text style={styles.trackTitle} numberOfLines={1}>{selectedTrack.title}</Text>
-                <Text style={styles.trackArtist} numberOfLines={1}>
-                  {selectedTrack.type === 'playlist'
-                    ? `${selectedTrack.ownerName || selectedTrack.artist || '플레이리스트'}${selectedTrack.trackCount ? ` · ${selectedTrack.trackCount}곡` : ''}`
-                    : selectedTrack.artist}
-                </Text>
+            {selectedTrack ? (
+              <View style={styles.selectedTrackBox}>
+                <TrackArtwork track={selectedTrack} size={54} />
+                <View style={styles.trackTextBox}>
+                  <Text style={styles.selectedLabel}>
+                    선택된 장소 {selectedTrack.type === 'playlist' ? '플레이리스트' : '곡'}
+                  </Text>
+                  <Text style={styles.trackTitle} numberOfLines={1}>{selectedTrack.title}</Text>
+                  <Text style={styles.trackArtist} numberOfLines={1}>
+                    {selectedTrack.type === 'playlist'
+                      ? `${selectedTrack.ownerName || selectedTrack.artist || '플레이리스트'}${selectedTrack.trackCount ? ` · ${selectedTrack.trackCount}곡` : ''}`
+                      : selectedTrack.artist}
+                  </Text>
+                </View>
               </View>
-            </View>
-          ) : null}
+            ) : null}
 
-          {trackResults.map((track) => (
-            <TrackResultCard
-              key={track.spotifyUri || track.id}
-              track={track}
-              isSelected={(selectedTrack?.spotifyUri || selectedTrack?.id) === (track.spotifyUri || track.id)}
-              onPress={(item) => setSelectedTrack(normalizePlayTargetForForm(item))}
-            />
-          ))}
-        </View>
-
-        <View style={styles.formActions}>
-          <TouchableOpacity
-            style={[styles.saveBtn, isSaving && styles.saveBtnDisabled]}
-            onPress={handleSave}
-            disabled={isSaving}
-          >
-            <Text style={styles.saveBtnText}>
-              {isSaving ? '저장 중...' : editingPlaceId ? '자동재생 수정하기' : '자동재생 저장하기'}
-            </Text>
-          </TouchableOpacity>
-          {editingPlaceId && (
-            <TouchableOpacity style={styles.cancelBtn} onPress={resetForm}>
-              <Text style={styles.cancelBtnText}>새 장소 등록으로 돌아가기</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        <View style={styles.savedPlacesSection}>
-          <View style={styles.savedPlacesHeader}>
-            <Text style={styles.savedPlacesTitle}>저장된 자동재생 장소</Text>
-            <TouchableOpacity onPress={loadSavedPlaces}>
-              <Text style={styles.savedPlacesRefresh}>새로고침</Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={styles.limitNotice}>
-            자동재생 설정은 한 사람당 최대 {MAX_AUTOPLAY_PLACES}개까지 저장할 수 있습니다. 현재 {activePlaces.length}/{MAX_AUTOPLAY_PLACES}
-          </Text>
-          {isLoadingSavedPlaces ? (
-            <View style={styles.loadingState}>
-              <ActivityIndicator color={UI.peach} />
-              <Text style={styles.loadingText}>저장된 장소를 불러오는 중...</Text>
-            </View>
-          ) : activePlaces.length === 0 ? (
-            <View style={styles.emptyState}>
-              <Text style={styles.emptyStateText}>아직 저장한 장소가 없어요.</Text>
-            </View>
-          ) : (
-            activePlaces.map((place) => (
-              <SavedPlaceCard
-                key={place.id}
-                place={place}
-                onLoad={applyPlaceToForm}
-                onDelete={handleDeleteSavedPlace}
+            {trackResults.map((track) => (
+              <TrackResultCard
+                key={track.spotifyUri || track.id}
+                track={track}
+                isSelected={(selectedTrack?.spotifyUri || selectedTrack?.id) === (track.spotifyUri || track.id)}
+                onPress={(item) => setSelectedTrack(normalizePlayTargetForForm(item))}
               />
-            ))
-          )}
-        </View>
+            ))}
+          </View>
 
-        <View style={{ height: 24 }} />
-      </ScrollView>
+          <View style={styles.formActions}>
+            <TouchableOpacity
+              ref={saveGuideRef}
+              style={[styles.saveBtn, isSaving && styles.saveBtnDisabled]}
+              onPress={handleSave}
+              disabled={isSaving}
+            >
+              <Text style={styles.saveBtnText}>
+                {isSaving ? '저장 중...' : editingPlaceId ? '장소 수정하기' : '장소 저장하기'}
+              </Text>
+            </TouchableOpacity>
+            {editingPlaceId && (
+              <TouchableOpacity style={styles.cancelBtn} onPress={resetForm}>
+                <Text style={styles.cancelBtnText}>새 장소 등록으로 돌아가기</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <View style={styles.savedPlacesSection}>
+            <View style={styles.savedPlacesHeader}>
+              <Text style={styles.savedPlacesTitle}>저장된 장소</Text>
+              <TouchableOpacity onPress={loadSavedPlaces}>
+                <Text style={styles.savedPlacesRefresh}>새로고침</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.limitNotice}>
+              장소 알림 설정은 한 사람당 최대 {MAX_AUTOPLAY_PLACES}개까지 저장할 수 있습니다. 현재 {activePlaces.length}/{MAX_AUTOPLAY_PLACES}
+            </Text>
+            {isLoadingSavedPlaces ? (
+              <View style={styles.loadingState}>
+                <ActivityIndicator color={UI.peach} />
+                <Text style={styles.loadingText}>저장된 장소를 불러오는 중...</Text>
+              </View>
+            ) : activePlaces.length === 0 ? (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyStateText}>아직 저장한 장소가 없어요.</Text>
+              </View>
+            ) : (
+              activePlaces.map((place) => (
+                <SavedPlaceCard
+                  key={place.id}
+                  place={place}
+                  onLoad={applyPlaceToForm}
+                  onDelete={handleDeleteSavedPlace}
+                />
+              ))
+            )}
+          </View>
+
+          <View style={{ height: 24 }} />
+        </ScrollView>
       </KeyboardAvoidingView>
+      <SpotlightGuide
+        visible={isPlaceGuideVisible}
+        steps={placeGuideSteps}
+        onFinish={finishPlaceGuide}
+      />
     </SafeAreaView>
   );
 }

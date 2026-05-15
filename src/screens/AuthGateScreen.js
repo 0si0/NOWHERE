@@ -352,9 +352,6 @@ export default function AuthGateScreen({ onComplete }) {
             )}
           </TouchableOpacity>
 
-          <Text style={styles.guestHint}>
-            NOWHERE 회원 계정은 Shall We Share 같은 사용자 간 기능의 고유 userId로 사용됩니다. Spotify 권한은 다음 단계에서 별도로 연결합니다.
-          </Text>
 
           {info ? <Text style={styles.infoText}>{info}</Text> : null}
           {error ? <Text style={styles.errorText}>{error}</Text> : null}

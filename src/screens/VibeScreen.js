@@ -1,4 +1,4 @@
-import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -18,6 +18,8 @@ import { LocationContext } from '../contexts/LocationContext';
 import { PlayerContext } from '../contexts/PlayerContext';
 import { useSession } from '../contexts/SessionContext';
 import KakaoMusicMap from '../components/KakaoMusicMap';
+import SpotlightGuide from '../components/SpotlightGuide';
+import useSpotlightGuide from '../hooks/useSpotlightGuide';
 import { API_KEYS } from '../constants';
 import {
   getNearbyShallWeShareRecords,
@@ -26,6 +28,7 @@ import {
 } from '../services/firebaseService';
 import { searchMusicMapTracks } from '../services/musicMapPlaylistService';
 import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
+import { SPOTLIGHT_GUIDE_KEYS } from '../services/spotlightGuideService';
 
 const SHARE_RADIUS_M = 350;
 const MESSAGE_MAX_LENGTH = 80;
@@ -152,11 +155,28 @@ export default function VibeScreen({ navigation }) {
   const [hasPostedToday, setHasPostedToday] = useState(false);
   const [nearbyShares, setNearbyShares] = useState([]);
   const [selectedShareId, setSelectedShareId] = useState('');
+  const composeGuideRef = useRef(null);
+  const nearbyMapGuideRef = useRef(null);
+  const { visible: isSharePlaceGuideVisible, finish: finishSharePlaceGuide } = useSpotlightGuide(SPOTLIGHT_GUIDE_KEYS.sharePlace);
 
   const normalizedCurrentTrack = useMemo(() => {
     const normalized = normalizeTrack(currentTrack || {});
     return normalized.title ? normalized : null;
   }, [currentTrack]);
+  const sharePlaceGuideSteps = useMemo(() => [
+    {
+      targetRef: composeGuideRef,
+      title: '이곳에 한마디 남기기',
+      description: '이곳에서는 하루에 한 번, 현재 장소에 노래와 한마디를 남길 수 있어요.',
+      placement: 'bottom',
+    },
+    {
+      targetRef: nearbyMapGuideRef,
+      title: '주변 사람들의 음악 보기',
+      description: '지도에서 주변 사람들은 어떤 곡을 오늘 듣고 있는지도 확인해봅시다!',
+      placement: 'top',
+    },
+  ], []);
 
   const canWrite = Boolean(
     authUser?.uid &&
@@ -370,7 +390,7 @@ export default function VibeScreen({ navigation }) {
             </View>
           ) : null}
 
-          <View style={styles.composeCard}>
+          <View ref={composeGuideRef} style={styles.composeCard}>
             <View style={styles.cardHeaderRow}>
               <Text style={styles.cardLabel}>오늘 이곳에 남기고 싶은 한마디</Text>
               <Text style={styles.counter}>{message.length}/{MESSAGE_MAX_LENGTH}</Text>
@@ -460,7 +480,7 @@ export default function VibeScreen({ navigation }) {
             </TouchableOpacity>
           </View>
 
-          <View style={styles.shareMapCard}>
+          <View ref={nearbyMapGuideRef} style={styles.shareMapCard}>
             <View style={styles.shareMapHeader}>
               <View>
                 <Text style={styles.shareMapTitle}>주변 음악 지도</Text>
@@ -558,11 +578,13 @@ export default function VibeScreen({ navigation }) {
             </View>
           )}
 
-          <Text style={styles.privacyText}>
-            정확한 위치는 저장하지 않고 약 100m 단위로 흐리게 처리합니다. 가까운 반경 안에서만 기록이 보입니다.
-          </Text>
         </ScrollView>
       </KeyboardAvoidingView>
+      <SpotlightGuide
+        visible={isSharePlaceGuideVisible}
+        steps={sharePlaceGuideSteps}
+        onFinish={finishSharePlaceGuide}
+      />
     </SafeAreaView>
   );
 }

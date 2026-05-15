@@ -1,5 +1,6 @@
 const {
   AndroidConfig,
+  withAppBuildGradle,
   withAndroidManifest,
   withInfoPlist,
 } = require('expo/config-plugins');
@@ -7,14 +8,41 @@ const {
 const SPOTIFY_PACKAGE = 'com.spotify.music';
 const DEFAULT_REDIRECT_SCHEME = 'com.nowhere.nowhere';
 const DEFAULT_REDIRECT_HOST = 'spotify-auth';
+const DEFAULT_REDIRECT_PATH_PATTERN = '.*';
 
 function ensureArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function quoteGradleString(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+function addAndroidManifestPlaceholders(buildGradle, redirectScheme, redirectHost, redirectPathPattern) {
+  if (buildGradle.includes('redirectSchemeName') && buildGradle.includes('redirectHostName')) {
+    return buildGradle;
+  }
+
+  const placeholders = [
+    '        manifestPlaceholders += [',
+    `            redirectSchemeName: '${quoteGradleString(redirectScheme)}',`,
+    `            redirectHostName: '${quoteGradleString(redirectHost)}',`,
+    `            redirectPathPattern: '${quoteGradleString(redirectPathPattern)}'`,
+    '        ]',
+  ].join('\n');
+
+  const defaultConfigPattern = /(defaultConfig\s*\{[\s\S]*?buildConfigField[^\n]*\n)/;
+  if (defaultConfigPattern.test(buildGradle)) {
+    return buildGradle.replace(defaultConfigPattern, `$1\n${placeholders}\n`);
+  }
+
+  return buildGradle.replace(/(defaultConfig\s*\{\n)/, `$1${placeholders}\n`);
+}
+
 function withNowherePlayer(config, props = {}) {
   const redirectScheme = props.spotifyRedirectScheme || DEFAULT_REDIRECT_SCHEME;
   const redirectHost = props.spotifyRedirectHost || DEFAULT_REDIRECT_HOST;
+  const redirectPathPattern = props.spotifyRedirectPathPattern || DEFAULT_REDIRECT_PATH_PATTERN;
 
   config = withInfoPlist(config, (plistConfig) => {
     const deprecatedMediaUsageKey = ['NS', 'Apple', 'Music', 'UsageDescription'].join('');
@@ -79,6 +107,18 @@ function withNowherePlayer(config, props = {}) {
     }
 
     return manifestConfig;
+  });
+
+  config = withAppBuildGradle(config, (buildGradleConfig) => {
+    if (buildGradleConfig.modResults.language === 'groovy') {
+      buildGradleConfig.modResults.contents = addAndroidManifestPlaceholders(
+        buildGradleConfig.modResults.contents,
+        redirectScheme,
+        redirectHost,
+        redirectPathPattern
+      );
+    }
+    return buildGradleConfig;
   });
 
   return config;

@@ -154,7 +154,7 @@ export default function SpotifyPermissionScreen({ onComplete }) {
       });
       const nextStatus = await refreshAccessRequestStatus();
       setAccessRequest(nextStatus || { status: 'pending' });
-      setRequestMessage('등록 요청을 보냈습니다. 개발자가 Spotify Console에 등록한 뒤 아래 Spotify 연결을 다시 시도해주세요.');
+      setRequestMessage('등록 요청을 보냈습니다. 완벽한 기능 사용 시까지 조금만 기다려주세요.');
       setSpotifyFullName('');
       setSpotifyEmail('');
     } catch (nextError) {
@@ -178,7 +178,7 @@ export default function SpotifyPermissionScreen({ onComplete }) {
         <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
           <View style={styles.logoBlock}>
             <Text style={styles.logo}>NOWHERE</Text>
-            <Text style={styles.subtitle}>뮤직지도 모드를 선택합니다</Text>
+            <Text style={styles.subtitle}>NOWHERE를 사용하려면, Spotify 계정이 필요합니다.</Text>
           </View>
 
           <View style={styles.statusPanel}>
@@ -195,9 +195,9 @@ export default function SpotifyPermissionScreen({ onComplete }) {
             <View style={styles.statusRow}>
               <Ionicons name="musical-notes-outline" size={24} color={UI.peach} />
               <View style={styles.statusTextWrap}>
-                <Text style={styles.statusTitle}>일반 뮤직지도</Text>
+                <Text style={styles.statusTitle}>Spotify 연결</Text>
                 <Text style={styles.statusText}>
-                  Spotify 계정 등록 없이 NOWHERE 플레이리스트 기반 뮤직지도를 사용할 수 있어요
+                  Spotify가 설치되지 않았다면, 지금 설치 해주세요.
                 </Text>
               </View>
             </View>
@@ -211,16 +211,14 @@ export default function SpotifyPermissionScreen({ onComplete }) {
           ) : null}
 
           {SHOW_MANUAL_SPOTIFY_ACCESS_REQUEST_FORM && !hasAccessRequest ? <View style={styles.requestPanel}>
-            <Text style={styles.requestTitle}>고급모드 Spotify 계정 등록 요청</Text>
+            <Text style={styles.requestTitle}>심사용 계정 등록 요청</Text>
             <Text style={styles.requestText}>
-              Spotify Development Mode 정책상 실제 Spotify 재생 상태 기반 기록은 등록된 고급모드 계정에서만 사용할 수 있어요.
+              Spotify Development Mode 정책상 Spotify api 사용을 위해서는 계정 인증이 필요합니다.
             </Text>
             <Text style={styles.requestText}>
-              고급모드로 테스트하려면 Spotify 계정의 full name과 email을 입력해주세요.
+              NOWHERE의 기능을 온전히 테스트하시려면, 아래의 방법 설명 버튼을 누르고, 확인하셔서 full name과 이메일을 입력하신 후 등록 요청을 보내주세요.
             </Text>
-            <Text style={styles.requestText}>
-              일반 모드에서는 Spotify 계정 등록 없이 NOWHERE 플레이리스트 기반 뮤직지도를 사용할 수 있어요.
-            </Text>
+
             <TouchableOpacity
               style={styles.helpButton}
               activeOpacity={0.86}
@@ -272,7 +270,7 @@ export default function SpotifyPermissionScreen({ onComplete }) {
               <View style={styles.pendingTextWrap}>
                 <Text style={styles.pendingTitle}>등록 요청 완료</Text>
                 <Text style={styles.pendingText}>
-                  개발자가 Spotify Console에 계정을 등록하면 Spotify 연결이 성공합니다. 아직 등록 전이면 연결 후 다시 이 화면으로 돌아옵니다.
+                  10~20분 정도 소요될 수 있습니다.
                 </Text>
               </View>
               <TouchableOpacity
@@ -299,16 +297,6 @@ export default function SpotifyPermissionScreen({ onComplete }) {
                 <Text style={styles.connectButtonText}>Spotify 연결</Text>
               </>
             )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.basicModeButton}
-            activeOpacity={0.86}
-            onPress={handleContinueBasicMode}
-            disabled={isConnecting || isSubmittingRequest}
-          >
-            <Ionicons name="map-outline" size={20} color={UI.peach} />
-            <Text style={styles.basicModeButtonText}>일반 모드로 계속</Text>
           </TouchableOpacity>
 
           {requestMessage ? <Text style={styles.infoText}>{requestMessage}</Text> : null}

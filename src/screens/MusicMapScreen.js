@@ -14,6 +14,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import KakaoMusicMap from '../components/KakaoMusicMap';
+import SpotlightGuide from '../components/SpotlightGuide';
+import useSpotlightGuide from '../hooks/useSpotlightGuide';
 import { PlayerContext } from '../contexts/PlayerContext';
 import { LocationContext } from '../contexts/LocationContext';
 import { useSession } from '../contexts/SessionContext';
@@ -37,6 +39,7 @@ import {
 import { MUSIC_MAP_RECORDING_MODES } from '../services/musicMapRecordingService';
 import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
 import { setMusicDiaryDraft } from '../services/musicDiaryDraftService';
+import { SPOTLIGHT_GUIDE_KEYS } from '../services/spotlightGuideService';
 
 const UI = {
   bg: '#05070A',
@@ -694,6 +697,12 @@ export default function MusicMapScreen({ navigation }) {
   const startActionInFlightRef = useRef(false);
   const stopActionInFlightRef = useRef(false);
   const recordingStartedAtRef = useRef(null);
+  const musicMapRecordGuideRef = useRef(null);
+  const demoPlaylistGuideRef = useRef(null);
+  const recordButtonGuideRef = useRef(null);
+  const normalModeGuideRef = useRef(null);
+  const captureGuideRef = useRef(null);
+  const { visible: isMusicMapGuideVisible, finish: finishMusicMapGuide } = useSpotlightGuide(SPOTLIGHT_GUIDE_KEYS.musicMap);
 
   const refreshMusicMapRecording = locationContext?.refreshMusicMapRecording;
   const refreshLocation = locationContext?.refreshLocation;
@@ -721,6 +730,38 @@ export default function MusicMapScreen({ navigation }) {
   );
   const activeRecordingMode = musicMapRecording.recordingMode || recordingMode;
   const isSequentialUrlMode = recordingMode === MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL;
+  const musicMapGuideSteps = useMemo(() => [
+    {
+      targetRef: musicMapRecordGuideRef,
+      title: '뮤직지도',
+      description: '뮤직지도는 내가 이동한 거리에 음악을 남길 수 있는 기능이에요.',
+      placement: 'bottom',
+    },
+    {
+      targetRef: demoPlaylistGuideRef,
+      title: '데모모드로 기록하기',
+      description: '아직 권한 설정을 받지 못했다면 우선 데모모드로 진행하세요. \n 플레이리스트를 정하고 기록을 누르면 순서대로 노래가 지도에 남아요.',
+      placement: 'center',
+    },
+    {
+      targetRef: recordButtonGuideRef,
+      title: '데모모드 주의사항',
+      description: '데모모드에서는 노래의 일시정지나 다음곡 넘기기를 하지 말아주세요. 또한 기록 중에는 항상 화면을 켠 채로 유지해야 해요.',
+      placement: 'center',
+    },
+    {
+      targetRef: normalModeGuideRef,
+      title: '일반모드로 기록하기',
+      description: '권한 설정이 완료되면 일반모드로 진행하세요. Spotify에서 재생 중인 노래들이 지도에 남아요. \n 일반모드에서는 제한 없이 모든 기록이 가능해요.',
+      placement: 'center',
+    },
+    {
+      targetRef: captureGuideRef,
+      title: '캡처하기',
+      description: '저장하고 싶은 트랙이 있다면,\n 캡처하기를 눌러 예쁘게 저장해보세요!',
+      placement: 'center',
+    },
+  ], []);
   const currentRecordingTrack = musicMapRecording.currentSegment?.track || currentTrack || null;
   const currentTrackIndex = useMemo(() => {
     if (!currentRecordingTrack || !trackPlaylist.length) return -1;
@@ -989,7 +1030,7 @@ export default function MusicMapScreen({ navigation }) {
       setSpotifyPlaylistUrl('');
       Alert.alert(
         '가져오기 완료',
-        '가져온 곡은 NOWHERE 내부 플레이리스트에 저장됩니다. 일반 모드는 곡마다 Spotify URL을 순서대로 엽니다.'
+        '가져온 곡은 NOWHERE 내부 플레이리스트에 저장됩니다. 데모 모드는 곡마다 Spotify URL을 순서대로 엽니다.'
       );
     } catch (nextError) {
       Alert.alert('가져오기 실패', nextError.message || 'Spotify 플레이리스트를 가져오지 못했습니다.');
@@ -1113,8 +1154,8 @@ export default function MusicMapScreen({ navigation }) {
 
     if (modeToStart === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING && !canUseSpotifyNowPlaying) {
       Alert.alert(
-        '고급모드 계정 필요',
-        '등록된 Spotify 계정에서는 현재 재생곡 기반 고급모드 기록을 사용할 수 있어요.'
+        '심사용 계정 필요',
+        '등록된 Spotify 계정에서는 현재 재생곡 기반 일반모드 기록을 사용할 수 있어요.'
       );
       return;
     }
@@ -1198,10 +1239,10 @@ export default function MusicMapScreen({ navigation }) {
         message.includes('심사용 계정 인증');
       Alert.alert(
         isSpotifyReviewAuthPending
-          ? '고급모드 인증 대기'
+          ? '일반모드 인증 대기'
           : isNoSpotifyPlayback
           ? 'Spotify 재생 필요'
-          : modeToStart === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING ? '고급모드 기록 실패' : '뮤직지도 기록 실패',
+          : modeToStart === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING ? '일반모드 기록 실패' : '뮤직지도 기록 실패',
         message
       );
     } finally {
@@ -1321,7 +1362,7 @@ export default function MusicMapScreen({ navigation }) {
                 <View style={styles.rulePill}>
                   <Ionicons name="information-circle-outline" size={16} color={UI.peach} />
                   <Text style={styles.ruleText}>
-                    일반모드에서는 노래를 일시정지 or 다음곡으로 넘기지마세요.
+                    데모모드에서는 노래를 일시정지 or 다음곡으로 넘기지마세요.
                   </Text>
                 </View>
               ) : null}
@@ -1337,8 +1378,8 @@ export default function MusicMapScreen({ navigation }) {
                 <View style={styles.recordModePanel}>
                   <View style={styles.modeSwitch}>
                     {[
-                      { key: MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL, label: '일반 모드' },
-                      { key: MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING, label: '고급모드' },
+                      { key: MUSIC_MAP_RECORDING_MODES.SEQUENTIAL_URL, label: '데모모드' },
+                      { key: MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING, label: '일반모드' },
                     ].map((mode) => {
                       const isActive = recordingMode === mode.key;
                       return (
@@ -1349,8 +1390,8 @@ export default function MusicMapScreen({ navigation }) {
                           onPress={() => {
                             if (mode.key === MUSIC_MAP_RECORDING_MODES.SPOTIFY_NOW_PLAYING && !canUseSpotifyNowPlaying) {
                               Alert.alert(
-                                '고급모드 Spotify 계정',
-                                '등록된 Spotify 계정에서는 현재 재생곡 기반 고급모드 기록을 사용할 수 있어요.'
+                                '일반모드 Spotify 계정',
+                                '등록된 Spotify 계정에서는 현재 재생곡 기반 일반모드 기록을 사용할 수 있어요.'
                               );
                             }
                             setRecordingMode(mode.key);
@@ -1364,7 +1405,7 @@ export default function MusicMapScreen({ navigation }) {
                 </View>
               ) : null}
 
-              <View style={[styles.recordControl, effectiveIsRecording && styles.recordControlActive]}>
+              <View ref={musicMapRecordGuideRef} style={[styles.recordControl, effectiveIsRecording && styles.recordControlActive]}>
                 <View style={styles.recordControlText}>
                   <Text style={styles.recordControlLabel}>{effectiveIsRecording ? 'RECORDING' : 'MUSIC MAP'}</Text>
                   <Text style={styles.recordControlTitle}>
@@ -1537,6 +1578,16 @@ export default function MusicMapScreen({ navigation }) {
                           {selectedRecord.tracks.length}곡 · {selectedRecord.recordType === 'pin' ? '한 지점 기록' : `${Math.round(selectedRecord.routeDistance)}m 이동`}
                         </Text>
                       </View>
+                      <TouchableOpacity
+                        ref={captureGuideRef}
+                        style={styles.selectedDiaryButton}
+                        onPress={handleOpenMusicDiary}
+                        activeOpacity={0.86}
+                      >
+                        <Ionicons name="journal-outline" size={30} color={UI.peach} />
+                        <Text style={styles.selectedDiaryText}>캡처하기</Text>
+                      </TouchableOpacity>
+
                       <TouchableOpacity style={styles.selectedOverlayClose} onPress={() => setSelectedRecordId('')}>
                         <Ionicons name="close-outline" size={18} color={UI.peach} />
                       </TouchableOpacity>
@@ -1554,14 +1605,6 @@ export default function MusicMapScreen({ navigation }) {
                   <View style={styles.selectedDetailsHeader}>
                     <Text style={styles.selectedOverlayLabel}>이 기록에 포함된 노래</Text>
                     <View style={styles.selectedHeaderActions}>
-                      <TouchableOpacity
-                        style={styles.selectedDiaryButton}
-                        onPress={handleOpenMusicDiary}
-                        activeOpacity={0.86}
-                      >
-                        <Ionicons name="journal-outline" size={14} color={UI.peach} />
-                        <Text style={styles.selectedDiaryText}>다이어리</Text>
-                      </TouchableOpacity>
                       <TouchableOpacity
                         style={[styles.selectedDeleteButton, isDeletingRecord && styles.selectedDeleteButtonDisabled]}
                         onPress={handleDeleteSelectedRecord}
@@ -1626,20 +1669,21 @@ export default function MusicMapScreen({ navigation }) {
           ) : (
             <View style={styles.playlistPanel}>
               <View style={styles.playlistHeader}>
-                <View>
-                  <Text style={styles.playlistLabel}>TRACK PLAYLIST</Text>
-                  <Text style={styles.playlistTitle}>플레이리스트 설정</Text>
-                </View>
-                <View style={styles.playlistHeaderActions}>
-                  <Text style={styles.playlistCount}>{trackPlaylist.length}/{MAX_TRACK_PLAYLIST_ITEMS}</Text>
+                <View style={styles.playlistHeaderTitleRow}>
                   <TouchableOpacity
-                    style={styles.playlistMapButton}
+                    style={styles.playlistBackButton}
                     onPress={() => setActiveTab('map')}
                     activeOpacity={0.86}
                   >
-                    <Ionicons name="map-outline" size={15} color={UI.peach} />
-                    <Text style={styles.playlistMapButtonText}>지도</Text>
+                    <Ionicons name="chevron-back-outline" size={19} color={UI.peach} />
                   </TouchableOpacity>
+                  <View>
+                    <Text style={styles.playlistLabel}>TRACK PLAYLIST</Text>
+                    <Text style={styles.playlistTitle}>플레이리스트 설정</Text>
+                  </View>
+                </View>
+                <View style={styles.playlistHeaderActions}>
+                  <Text style={styles.playlistCount}>{trackPlaylist.length}/{MAX_TRACK_PLAYLIST_ITEMS}</Text>
                 </View>
               </View>
               <View style={styles.playlistLibraryHeader}>
@@ -1794,6 +1838,11 @@ export default function MusicMapScreen({ navigation }) {
 
         {error ? <Text style={styles.errorText}>{error}</Text> : null}
       </ScrollView>
+      <SpotlightGuide
+        visible={isMusicMapGuideVisible}
+        steps={musicMapGuideSteps}
+        onFinish={finishMusicMapGuide}
+      />
     </SafeAreaView>
   );
 }
@@ -2455,6 +2504,23 @@ const styles = StyleSheet.create({
   playlistHeaderActions: {
     alignItems: 'flex-end',
     gap: 8,
+  },
+  playlistHeaderTitleRow: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  playlistBackButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: UI.border,
+    backgroundColor: 'rgba(255, 201, 184, 0.06)',
   },
   playlistMapButton: {
     minHeight: 30,

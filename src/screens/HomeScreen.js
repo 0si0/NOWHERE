@@ -17,11 +17,14 @@ import { PlayerContext } from '../contexts/PlayerContext';
 import { LocationContext } from '../contexts/LocationContext';
 import { useSession } from '../contexts/SessionContext';
 import ChallengePanel from '../components/ChallengePanel';
+import SpotlightGuide from '../components/SpotlightGuide';
+import useSpotlightGuide from '../hooks/useSpotlightGuide';
 import { buildListeningContext, recordListeningEvent } from '../services/listeningHistoryService';
 import { clearRecommendationCache, getChallengeRecommendation, getRecommendationSlots } from '../services/recommendationService';
 import { getWeatherMoodLabel } from '../services/weatherService';
 import { resetOnboardingState } from '../services/onboardingService';
 import { clearSpotifyAccessRequestStatus, signOutNowhereAccount } from '../services/firebaseService';
+import { SPOTLIGHT_GUIDE_KEYS } from '../services/spotlightGuideService';
 
 const EMPTY_MARK = require('../../assets/EmptyMark.png');
 const CHALLENGE_MARK = require('../../assets/ChallengeMark.png');
@@ -40,7 +43,7 @@ const UI = {
 };
 
 const FEATURE_ACTIONS = [
-  { key: 'place', label: '자동재생하기', icon: 'location-outline', screen: 'PlaceSetup' },
+  { key: 'place', label: '장소알림설정', icon: 'location-outline', screen: 'PlaceSetup' },
   { key: 'map', label: '뮤직지도', icon: 'map-outline', screen: 'MusicMap' },
   { key: 'like', label: '좋아요', icon: 'heart-outline' },
   { key: 'share', label: '이곳에 한마디', icon: 'arrow-redo-outline', screen: 'Vibe' },
@@ -190,9 +193,10 @@ function ContextChip({ icon, label, compact }) {
   );
 }
 
-function ActionTile({ action, onPress, compact, active, disabled }) {
+function ActionTile({ action, onPress, compact, active, disabled, targetRef }) {
   return (
     <TouchableOpacity
+      ref={targetRef}
       style={[styles.actionTile, active && styles.actionTileActive, disabled && styles.actionTileDisabled]}
       activeOpacity={0.82}
       onPress={onPress}
@@ -361,6 +365,11 @@ export default function HomeScreen({ navigation }) {
   const seenRecommendationKeysRef = useRef([]);
   const spotifyEnsureInFlightRef = useRef(false);
   const locationPromptShownRef = useRef(false);
+  const mainCircleGuideRef = useRef(null);
+  const recommendationNavGuideRef = useRef(null);
+  const likeGuideRef = useRef(null);
+  const refreshGuideRef = useRef(null);
+  const { visible: isHomeGuideVisible, finish: finishHomeGuide } = useSpotlightGuide(SPOTLIGHT_GUIDE_KEYS.home);
 
   const isTiny = height < 740;
   const isCompact = height < 820;
@@ -386,6 +395,32 @@ export default function HomeScreen({ navigation }) {
   }, [foregroundPermission, requestPermissions]);
   const titleFontSize = isCompact ? 24 : 31;
   const isAutoPlayVisibleOn = autoPlayModeEnabled && hasBackgroundPermission;
+  const homeGuideSteps = useMemo(() => [
+    {
+      targetRef: mainCircleGuideRef,
+      title: '음악 시작하기',
+      description: '큰 원을 눌러서 지금의 시간, 장소, 날씨에 어울리는 노래를 재생하세요!',
+      placement: 'bottom',
+    },
+    {
+      targetRef: recommendationNavGuideRef,
+      title: '추천곡 넘기기',
+      description: '좌측/우측 버튼을 눌러서 다음 추천곡으로 넘겨보세요.',
+      placement: 'bottom',
+    },
+    {
+      targetRef: likeGuideRef,
+      title: '마음에 드는 곡 저장',
+      description: '마음에 드는 곡이 나온다면 “좋아요”를 눌러주세요. \n 지금의 시간, 장소, 날씨에 또 이 곡을 추천드릴게요.',
+      placement: 'top',
+    },
+    {
+      targetRef: refreshGuideRef,
+      title: '새로운 추천 받기',
+      description: '새로고침 버튼을 눌러서 새로운 추천곡을 받아보세요!',
+      placement: 'bottom',
+    },
+  ], []);
 
   const recommendationContext = useMemo(() => (
     buildListeningContext({
@@ -817,13 +852,14 @@ export default function HomeScreen({ navigation }) {
             <Text style={styles.sectionCaption}>{recommendationCaption}</Text>
           </View>
 
-          <View style={styles.heroWrap}>
+          <View ref={recommendationNavGuideRef} style={styles.heroWrap}>
             <TouchableOpacity style={styles.arrowButton} activeOpacity={0.8} onPress={() => moveRecommendation(-1)}>
               <Ionicons name="chevron-back-outline" size={32} color={UI.peach} />
             </TouchableOpacity>
 
             <View style={styles.wheelFrame}>
               <TouchableOpacity
+                ref={mainCircleGuideRef}
                 {...wheelPanResponder.panHandlers}
                 activeOpacity={0.9}
                 onPress={handlePlay}
@@ -852,6 +888,7 @@ export default function HomeScreen({ navigation }) {
                 {selectedTrack.isChallenge ? null : <View style={styles.wheelGlass} />}
               </TouchableOpacity>
               <TouchableOpacity
+                ref={refreshGuideRef}
                 style={styles.wheelRefreshButton}
                 activeOpacity={0.82}
                 onPress={handleRefreshRecommendationPress}
@@ -905,6 +942,7 @@ export default function HomeScreen({ navigation }) {
                   compact={isCompact}
                   active={action.key === 'like' && isSelectedTrackLiked}
                   disabled={action.key === 'like' && (isLoadingRecommendations || selectedTrack.isActionRequired)}
+                  targetRef={action.key === 'like' ? likeGuideRef : null}
                 />
               ))}
             </View>
@@ -922,6 +960,11 @@ export default function HomeScreen({ navigation }) {
           visible={isChallengeOpen}
           onClose={() => setIsChallengeOpen(false)}
           onSubmit={handleChallengeSubmit}
+        />
+        <SpotlightGuide
+          visible={isHomeGuideVisible}
+          steps={homeGuideSteps}
+          onFinish={finishHomeGuide}
         />
       </SafeAreaView>
     </View>

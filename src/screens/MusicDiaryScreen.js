@@ -1,24 +1,20 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
   Image,
-  KeyboardAvoidingView,
-  Platform,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import Svg, { Circle, Defs, LinearGradient, Path, Stop } from 'react-native-svg';
-import { captureRef } from 'react-native-view-shot';
-import * as MediaLibrary from 'expo-media-library';
-import * as Sharing from 'expo-sharing';
+import KakaoMusicMap from '../components/KakaoMusicMap';
+import { API_KEYS } from '../constants';
 import { getMusicDiaryDraft } from '../services/musicDiaryDraftService';
+
+const RECEIPT_BACKGROUND = require('../../assets/receipt-transparent.png');
 
 const UI = {
   bg: '#05070A',
@@ -29,10 +25,12 @@ const UI = {
   textSoft: '#D9C6C0',
   textMuted: '#9E908D',
   peach: '#FFC8B8',
+  receiptInk: '#144D32',
+  receiptText: '#1E1A18',
+  receiptMuted: '#5D6760',
 };
 
-const DIARY_MAX_LENGTH = 260;
-const EMOTION_TAGS = ['잔잔함', '설렘', '비 오는 밤', '드라이브', '혼자 걷기'];
+const RECEIPT_ROUTE_PREVIEW_HEIGHT = 260;
 
 function getDate(value) {
   if (!value) return null;
@@ -113,6 +111,43 @@ function getDiaryTrack(record = {}, selectedTrack = {}) {
   };
 }
 
+function getRecordCenter(record = {}) {
+  const routePoints = Array.isArray(record.routePoints) ? record.routePoints.map(normalizePoint).filter(Boolean) : [];
+  return normalizePoint(record.location) ||
+    normalizePoint(record.endLocation) ||
+    routePoints[routePoints.length - 1] ||
+    normalizePoint(record.startLocation) ||
+    null;
+}
+
+function getSummaryTracks(record = {}, track = {}) {
+  const sourceTracks = Array.isArray(record.tracks) && record.tracks.length > 0
+    ? record.tracks
+    : Array.isArray(record.routeSegments)
+      ? record.routeSegments
+      : [];
+  const tracks = sourceTracks
+    .map((item) => item?.track || item)
+    .filter(Boolean)
+    .map((item, index) => ({
+      id: item.id || item.trackId || item.spotifyUri || `track-${index}`,
+      title: item.title || item.trackName || track.title,
+      artist: item.artist || item.artistName || track.artist,
+      artworkUrl: item.artworkUrl || item.albumArtUrl || track.artworkUrl,
+    }));
+  const fallback = {
+    id: track.title || 'current-track',
+    title: track.title,
+    artist: track.artist,
+    artworkUrl: track.artworkUrl,
+  };
+  return (tracks.length ? tracks : [fallback]).filter((item) => item.title || item.artworkUrl).slice(0, 4);
+}
+
+function getRecordId(record = {}) {
+  return record.id || record.recordId || record.sessionId || 'music-diary-record';
+}
+
 function MusicRoutePreview({ record, color }) {
   const routePoints = Array.isArray(record?.routePoints) ? record.routePoints : [];
   const fallbackPath = buildPath(routePoints);
@@ -149,103 +184,86 @@ function MusicRoutePreview({ record, color }) {
   );
 }
 
+function ReceiptRoutePreview({
+  record,
+  color,
+  isEditable,
+  shouldFitRecords,
+  useStaticPreview,
+}) {
+  const center = getRecordCenter(record);
+  const recordId = getRecordId(record);
+  const previewRecord = { ...record, id: recordId };
+  const canRenderKakaoMap = Boolean(API_KEYS?.KAKAO_MAPS && API_KEYS?.KAKAO_MAPS_BASE_URL && center);
+
+  if (useStaticPreview || !canRenderKakaoMap) {
+    return <MusicRoutePreview record={record} color={color} />;
+  }
+
+  if (canRenderKakaoMap) {
+    return (
+      <View
+        collapsable={false}
+        pointerEvents={isEditable ? 'auto' : 'none'}
+        style={styles.receiptKakaoCapture}
+      >
+        <KakaoMusicMap
+          apiKey={API_KEYS.KAKAO_MAPS}
+          baseUrl={API_KEYS.KAKAO_MAPS_BASE_URL}
+          center={center}
+          records={[previewRecord]}
+          mode="track"
+          selectedRecordId={recordId}
+          height={RECEIPT_ROUTE_PREVIEW_HEIGHT}
+          shouldFitRecords={shouldFitRecords}
+          disableGestures={!isEditable}
+          shouldFocusSelectedRecord={false}
+        />
+      </View>
+    );
+  }
+
+  return <MusicRoutePreview record={record} color={color} />;
+}
+
 export default function MusicDiaryScreen({ navigation, route }) {
   const draft = getMusicDiaryDraft(route?.params?.draftId);
   const record = draft?.record || route?.params?.record || {};
   const selectedTrack = draft?.track || route?.params?.track || null;
-  const cardRef = useRef(null);
-  const [diaryText, setDiaryText] = useState('');
-  const [emotionTag, setEmotionTag] = useState('');
-  const [capturedUri, setCapturedUri] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
+  const [isRouteMapEditable, setIsRouteMapEditable] = useState(false);
+  const [hasRouteMapAdjusted, setHasRouteMapAdjusted] = useState(false);
 
   const track = useMemo(() => getDiaryTrack(record, selectedTrack), [record, selectedTrack]);
+  const summaryTracks = useMemo(() => getSummaryTracks(record, track), [record, track]);
+  const summaryTrackCount = useMemo(() => {
+    if (Array.isArray(record.tracks) && record.tracks.length > 0) return record.tracks.length;
+    if (Array.isArray(record.routeSegments) && record.routeSegments.length > 0) return record.routeSegments.length;
+    return summaryTracks.length;
+  }, [record.routeSegments, record.tracks, summaryTracks.length]);
   const pointColor = track.albumColor || UI.peach;
-  const diaryDisplayText = diaryText.trim() || '이 길을 걸으며 남기고 싶은 감정을 적어주세요.';
+  const musicSummaryText = [track.title, track.artist].filter(Boolean).join(', ');
 
-  const captureCard = useCallback(async () => {
-    if (!cardRef.current) {
-      throw new Error('카드를 준비하지 못했습니다.');
-    }
-    const uri = await captureRef(cardRef.current, {
-      format: 'png',
-      quality: 1,
-      result: 'tmpfile',
-    });
-    setCapturedUri(uri);
-    return uri;
-  }, []);
-
-  const handleCaptureCard = useCallback(async () => {
-    setIsSaving(true);
-    try {
-      await captureCard();
-      Alert.alert('음악 카드 저장 완료', '카드 이미지가 만들어졌습니다. 사진첩 저장 또는 공유를 이어서 할 수 있어요.');
-    } catch (error) {
-      Alert.alert('저장 실패', error.message || '음악 카드를 이미지로 만들지 못했습니다.');
-    } finally {
-      setIsSaving(false);
-    }
-  }, [captureCard]);
-
-  const handleSaveToLibrary = useCallback(async () => {
-    setIsSaving(true);
-    try {
-      const permission = await MediaLibrary.requestPermissionsAsync();
-      if (!permission.granted) {
-        Alert.alert('사진 권한 필요', '음악 카드를 사진첩에 저장하려면 사진 접근 권한이 필요합니다.');
-        return;
-      }
-      const uri = capturedUri || await captureCard();
-      await MediaLibrary.saveToLibraryAsync(uri);
-      Alert.alert('사진첩 저장 완료', '뮤직 다이어리 카드가 사진첩에 저장됐습니다.');
-    } catch (error) {
-      Alert.alert('사진첩 저장 실패', error.message || '사진첩에 저장하지 못했습니다.');
-    } finally {
-      setIsSaving(false);
-    }
-  }, [captureCard, capturedUri]);
-
-  const handleShare = useCallback(async () => {
-    setIsSaving(true);
-    try {
-      const canShare = await Sharing.isAvailableAsync();
-      if (!canShare) {
-        Alert.alert('공유 불가', '현재 기기에서 공유 기능을 사용할 수 없습니다.');
-        return;
-      }
-      const uri = capturedUri || await captureCard();
-      await Sharing.shareAsync(uri, {
-        mimeType: 'image/png',
-        dialogTitle: 'NOWHERE 뮤직 다이어리 공유',
-      });
-    } catch (error) {
-      Alert.alert('공유 실패', error.message || '음악 카드를 공유하지 못했습니다.');
-    } finally {
-      setIsSaving(false);
-    }
-  }, [captureCard, capturedUri]);
+  useEffect(() => {
+    setIsRouteMapEditable(false);
+    setHasRouteMapAdjusted(false);
+  }, [record?.id, record?.recordId, record?.sessionId]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-      <KeyboardAvoidingView style={styles.keyboard} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-          <View style={styles.header}>
-            <TouchableOpacity style={styles.circleButton} onPress={() => navigation.goBack()} activeOpacity={0.86}>
-              <Ionicons name="chevron-back-outline" size={25} color={UI.peach} />
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.circleButton} onPress={handleCaptureCard} activeOpacity={0.86}>
-              <Ionicons name="ellipsis-horizontal" size={22} color={UI.peach} />
-            </TouchableOpacity>
-          </View>
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+        <View style={styles.header}>
+          <TouchableOpacity style={styles.circleButton} onPress={() => navigation.goBack()} activeOpacity={0.86}>
+            <Ionicons name="chevron-back-outline" size={25} color={UI.peach} />
+          </TouchableOpacity>
+          <View style={styles.headerSpacer} />
+        </View>
 
-          <View style={styles.titleBlock}>
-            <Text style={styles.title}>뮤직 다이어리</Text>
-            <Text style={styles.subtitle}>공간과 음악, 오늘의 감정을 남겨요</Text>
-          </View>
+        <View style={styles.titleBlock}>
+          <Text style={styles.title}>Music Receipt</Text>
+          <Text style={styles.subtitle}>공간과 음악, 오늘의 감정을 남겨요</Text>
+        </View>
 
           <View
-            ref={cardRef}
             collapsable={false}
             style={[
               styles.card,
@@ -255,129 +273,77 @@ export default function MusicDiaryScreen({ navigation, route }) {
               },
             ]}
           >
-            {track.artworkUrl ? (
-              <Image source={{ uri: track.artworkUrl }} style={styles.cardBlurArtwork} blurRadius={28} />
-            ) : null}
-            <View style={[styles.cardColorWash, { backgroundColor: hexToRgba(pointColor, 0.30) }]} />
+            <Image source={RECEIPT_BACKGROUND} style={styles.receiptBackground} resizeMode="contain" />
 
-            <View style={styles.cardTopRow}>
+            <View style={[styles.cardTopRow, styles.receiptOverlay]}>
               <View style={styles.cardChip}>
-                <Ionicons name="location-outline" size={15} color={UI.peach} />
                 <Text style={styles.cardChipText} numberOfLines={1}>{record.placeName || '내 음악 위치'}</Text>
               </View>
-              <View style={styles.cardChip}>
-                <Ionicons name="map-outline" size={15} color={UI.peach} />
-                <Text style={styles.cardChipText}>뮤직맵 기록</Text>
+            </View>
+
+            <View style={[styles.receiptMetaRow, styles.receiptOverlay]}>
+              <View style={styles.receiptMetaCell}>
+                <Text style={styles.receiptValue}>{formatDateTime(record.startedAt || record.recordedAt)}</Text>
+              </View>
+              <View style={styles.receiptMetaCell}>
+                <Text style={styles.receiptValue}>
+                  {formatDistance(record.routeDistance)} 이동 · {formatDuration(record.playedDurationMs)}
+                </Text>
               </View>
             </View>
 
-            <MusicRoutePreview record={record} color={pointColor} />
-
-            <View style={styles.cardMetaBlock}>
-              <Text style={styles.cardDate}>{formatDateTime(record.startedAt || record.recordedAt)}</Text>
-              <Text style={styles.cardPlaceTitle} numberOfLines={1}>{record.placeName || '내 음악 위치'}</Text>
-              <Text style={styles.cardPlaceMeta}>
-                {formatDistance(record.routeDistance)} 이동 · {formatDuration(record.playedDurationMs)} 기록
-              </Text>
-            </View>
-
-            <View style={styles.cardDivider} />
-
-            <View style={styles.trackBlock}>
-              <Image
-                source={track.artworkUrl ? { uri: track.artworkUrl } : require('../../assets/AppLogo.png')}
-                style={[styles.cardArtwork, { borderColor: hexToRgba(pointColor, 0.55) }]}
+            <View style={[styles.routePreviewSlot, styles.receiptOverlay]}>
+              <ReceiptRoutePreview
+                record={record}
+                color={pointColor}
+                isEditable={isRouteMapEditable}
+                shouldFitRecords={!hasRouteMapAdjusted}
+                useStaticPreview={false}
               />
-              <View style={styles.trackTextBlock}>
-                <Text style={styles.trackTitle} numberOfLines={2}>{track.title}</Text>
-                <Text style={styles.trackArtist} numberOfLines={1}>{track.artist}</Text>
-                {track.album ? <Text style={styles.trackAlbum} numberOfLines={1}>{track.album}</Text> : null}
-                <View style={styles.trackProgressRow}>
-                  <View style={styles.playCircle}>
-                    <Ionicons name="play" size={11} color={UI.peach} />
-                  </View>
-                  <Text style={styles.trackTime}>{formatDuration(track.playedDurationMs || record.playedDurationMs)}</Text>
-                  <View style={styles.progressTrack}>
-                    <View style={[styles.progressFill, { backgroundColor: pointColor }]} />
-                  </View>
+              <TouchableOpacity
+                style={styles.mapEditButton}
+                onPress={() => {
+                  setHasRouteMapAdjusted(true);
+                  setIsRouteMapEditable((current) => !current);
+                }}
+                activeOpacity={0.86}
+              >
+                <Ionicons name={isRouteMapEditable ? 'checkmark-outline' : 'expand-outline'} size={16} color={UI.receiptInk} />
+              </TouchableOpacity>
+              {isRouteMapEditable ? (
+                <View style={styles.mapEditBadge} pointerEvents="none">
+                  <Text style={styles.mapEditBadgeText}>지도를 움직여 위치를 맞춘 뒤 저장하세요</Text>
                 </View>
+              ) : null}
+            </View>
+
+            <View style={[styles.musicSummaryRow, styles.receiptOverlay]}>
+              <View style={styles.summaryArtworkStack}>
+                {summaryTracks.slice(0, 3).map((item, index) => (
+                  <Image
+                    key={item.id || `summary-${index}`}
+                    source={item.artworkUrl ? { uri: item.artworkUrl } : require('../../assets/AppLogo.png')}
+                    style={[
+                      styles.summaryArtwork,
+                      {
+                        left: index * 26,
+                        zIndex: 4 - index,
+                        borderColor: index === 0 ? pointColor : '#F1E9DA',
+                      },
+                    ]}
+                  />
+                ))}
+              </View>
+              <View style={styles.musicSummaryTextBlock}>
+                <Text style={styles.summaryTitle}>{summaryTrackCount}곡 포함</Text>
+                <Text style={styles.summarySubtitle} numberOfLines={2}>
+                  {musicSummaryText}
+                </Text>
               </View>
             </View>
 
-            <View style={styles.diaryQuote}>
-              <Text style={styles.quoteMark}>“</Text>
-              <Text style={styles.diaryCardText}>{diaryDisplayText}</Text>
-              <Text style={styles.quoteMarkEnd}>”</Text>
-            </View>
-
-            <View style={styles.cardFooter}>
-              <View style={styles.footerBrandIcon}>
-                <Ionicons name="musical-note-outline" size={18} color={UI.peach} />
-              </View>
-              <View>
-                <Text style={styles.footerTitle}>Music Map Record</Text>
-                <Text style={styles.footerBrand}>N O W H E R E</Text>
-              </View>
-              <View style={[styles.compassButton, { shadowColor: pointColor }]}>
-                <Ionicons name="navigate" size={20} color={UI.peach} />
-              </View>
-            </View>
           </View>
-
-          <View style={styles.inputPanel}>
-            <View style={styles.inputHeader}>
-              <Text style={styles.inputTitle}>오늘의 다이어리</Text>
-              <Text style={styles.inputCount}>{diaryText.length}/{DIARY_MAX_LENGTH}</Text>
-            </View>
-            <TextInput
-              value={diaryText}
-              onChangeText={(text) => {
-                setCapturedUri('');
-                setDiaryText(text.slice(0, DIARY_MAX_LENGTH));
-              }}
-              placeholder="이 길을 걸으며 어떤 기분이었나요?"
-              placeholderTextColor={UI.textMuted}
-              style={styles.diaryInput}
-              multiline
-              maxLength={DIARY_MAX_LENGTH}
-            />
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tagScroller}>
-              {EMOTION_TAGS.map((tag) => {
-                const isActive = emotionTag === tag;
-                return (
-                  <TouchableOpacity
-                    key={tag}
-                    style={[styles.emotionTag, isActive && { borderColor: pointColor, backgroundColor: hexToRgba(pointColor, 0.16) }]}
-                    onPress={() => {
-                      setCapturedUri('');
-                      setEmotionTag((current) => (current === tag ? '' : tag));
-                      if (!diaryText.trim()) setDiaryText(tag);
-                    }}
-                    activeOpacity={0.86}
-                  >
-                    <Text style={[styles.emotionTagText, isActive && { color: UI.text }]}>{tag}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-          </View>
-
-          <View style={styles.actionRow}>
-            <TouchableOpacity style={styles.secondaryAction} onPress={handleCaptureCard} disabled={isSaving} activeOpacity={0.86}>
-              <Ionicons name="download-outline" size={20} color={UI.peach} />
-              <Text style={styles.secondaryActionText}>저장</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.secondaryActionWide} onPress={handleSaveToLibrary} disabled={isSaving} activeOpacity={0.86}>
-              <Ionicons name="image-outline" size={20} color={UI.peach} />
-              <Text style={styles.secondaryActionText}>사진첩에 저장</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.primaryAction, { backgroundColor: pointColor }]} onPress={handleShare} disabled={isSaving} activeOpacity={0.86}>
-              {isSaving ? <ActivityIndicator color="#211817" size="small" /> : <Ionicons name="share-outline" size={21} color="#211817" />}
-              <Text style={styles.primaryActionText}>공유하기</Text>
-            </TouchableOpacity>
-          </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -392,7 +358,7 @@ const styles = StyleSheet.create({
   },
   content: {
     paddingHorizontal: 24,
-    paddingBottom: 28,
+    paddingBottom: 220,
   },
   header: {
     minHeight: 58,
@@ -410,6 +376,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: UI.border,
   },
+  headerSpacer: {
+    width: 48,
+    height: 48,
+  },
   titleBlock: {
     marginTop: 18,
     marginBottom: 22,
@@ -426,60 +396,55 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   card: {
-    aspectRatio: 3 / 4,
+    aspectRatio: 2 / 3,
     width: '100%',
-    borderRadius: 30,
+    borderRadius: 24,
     overflow: 'hidden',
-    padding: 16,
-    backgroundColor: '#151013',
-    borderWidth: 1.4,
-    shadowOpacity: 0.45,
-    shadowRadius: 22,
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+    shadowOpacity: 0.26,
+    shadowRadius: 18,
     shadowOffset: { width: 0, height: 0 },
-    elevation: 10,
+    elevation: 7,
   },
-  cardBlurArtwork: {
-    position: 'absolute',
-    top: -60,
-    right: -60,
-    width: '92%',
-    height: '92%',
-    opacity: 0.38,
-  },
-  cardColorWash: {
+  receiptBackground: {
     position: 'absolute',
     top: 0,
     right: 0,
     bottom: 0,
     left: 0,
-    opacity: 0.82,
+    width: '100%',
+    height: '100%',
+  },
+  receiptOverlay: {
+    position: 'absolute',
+    left: '7.6%',
+    right: '7.6%',
   },
   cardTopRow: {
+    top: '6.0%',
     flexDirection: 'row',
     justifyContent: 'space-between',
     gap: 10,
   },
   cardChip: {
-    maxWidth: '52%',
-    minHeight: 30,
-    borderRadius: 15,
-    paddingHorizontal: 10,
+    maxWidth: '48%',
+    minHeight: 34,
+    paddingHorizontal: 6,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(255, 241, 236, 0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 201, 184, 0.24)',
+    backgroundColor: 'transparent',
   },
   cardChipText: {
-    color: UI.text,
-    fontSize: 11,
+    color: UI.receiptInk,
+    fontSize: 12,
     fontWeight: '800',
+    marginLeft: 38,
   },
   routePreview: {
-    height: 92,
-    marginTop: 8,
-    marginHorizontal: -2,
+    height: RECEIPT_ROUTE_PREVIEW_HEIGHT,
+    marginTop: 6,
+    marginHorizontal: 0,
     overflow: 'hidden',
   },
   mapGrid: {
@@ -493,277 +458,127 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: 'rgba(255, 241, 236, 0.04)',
   },
-  cardMetaBlock: {
-    marginTop: -2,
-  },
-  cardDate: {
-    color: UI.peach,
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  cardPlaceTitle: {
-    color: UI.peach,
-    fontSize: 22,
-    fontWeight: '300',
-    marginTop: 6,
-  },
-  cardPlaceMeta: {
-    color: UI.textSoft,
-    fontSize: 11,
-    fontWeight: '700',
-    marginTop: 4,
-  },
-  cardDivider: {
-    height: 1,
-    marginVertical: 10,
-    backgroundColor: 'rgba(255, 201, 184, 0.14)',
-  },
-  trackBlock: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 14,
-  },
-  cardArtwork: {
-    width: 86,
-    height: 86,
-    borderRadius: 13,
-    borderWidth: 1,
-    backgroundColor: '#211817',
-  },
-  trackTextBlock: {
-    flex: 1,
-    minWidth: 0,
-  },
-  trackTitle: {
-    color: '#FFFFFF',
-    fontSize: 18,
-    fontWeight: '900',
-    lineHeight: 22,
-  },
-  trackArtist: {
-    color: UI.textSoft,
-    fontSize: 13,
-    fontWeight: '800',
-    marginTop: 6,
-  },
-  trackAlbum: {
-    color: UI.textMuted,
-    fontSize: 11,
-    fontWeight: '700',
-    marginTop: 3,
-  },
-  trackProgressRow: {
-    minHeight: 22,
-    marginTop: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  playCircle: {
-    width: 19,
-    height: 19,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: UI.peach,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  trackTime: {
-    color: UI.peach,
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  progressTrack: {
-    flex: 1,
-    height: 3,
-    borderRadius: 2,
-    backgroundColor: 'rgba(255, 241, 236, 0.12)',
-    overflow: 'hidden',
-  },
-  progressFill: {
-    width: '48%',
-    height: '100%',
-    borderRadius: 2,
-  },
   diaryQuote: {
-    flex: 1,
-    minHeight: 58,
-    marginTop: 12,
-    paddingHorizontal: 7,
+    top: '84.3%',
+    height: '5.6%',
+    paddingHorizontal: 12,
     justifyContent: 'center',
   },
   quoteMark: {
     position: 'absolute',
-    left: 0,
-    top: -10,
-    color: 'rgba(255, 201, 184, 0.18)',
-    fontSize: 32,
+    left: 8,
+    top: 8,
+    color: 'rgba(20, 77, 50, 0.54)',
+    fontSize: 28,
     fontWeight: '900',
   },
   quoteMarkEnd: {
     position: 'absolute',
-    right: 0,
-    bottom: -16,
-    color: 'rgba(255, 201, 184, 0.14)',
-    fontSize: 32,
+    right: 6,
+    bottom: 0,
+    color: 'rgba(20, 77, 50, 0.54)',
+    fontSize: 28,
     fontWeight: '900',
   },
   diaryCardText: {
-    color: UI.text,
-    fontSize: 13,
-    lineHeight: 20,
+    color: UI.receiptText,
+    fontSize: 11,
+    lineHeight: 17,
+    fontWeight: '700',
+    textAlign: 'center',
+    paddingHorizontal: 19,
+  },
+  receiptMetaRow: {
+    top: '22.6%',
+    height: '5.2%',
+    flexDirection: 'row',
+    gap: 36,
+  },
+  receiptMetaCell: {
+    flex: 1,
+  },
+  receiptValue: {
+    color: UI.receiptText,
+    fontSize: 12,
+    lineHeight: 16,
     fontWeight: '700',
   },
-  cardFooter: {
-    minHeight: 42,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderStyle: 'dashed',
-    borderTopColor: 'rgba(255, 201, 184, 0.18)',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 11,
+  routePreviewSlot: {
+    top: '30.4%',
+    height: '41.8%',
+    overflow: 'hidden',
   },
-  footerBrandIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+  receiptKakaoCapture: {
+    height: '100%',
+    borderRadius: 0,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(20, 77, 50, 0.08)',
+  },
+  mapEditButton: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 30,
+    height: 30,
+    borderRadius: 15,
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: 'rgba(245, 239, 225, 0.88)',
     borderWidth: 1,
-    borderColor: UI.border,
-    backgroundColor: 'rgba(5, 7, 10, 0.28)',
+    borderColor: 'rgba(20, 77, 50, 0.34)',
   },
-  footerTitle: {
-    color: UI.textMuted,
-    fontSize: 11,
-    fontWeight: '800',
+  mapEditBadge: {
+    position: 'absolute',
+    left: 8,
+    right: 44,
+    bottom: 6,
+    minHeight: 24,
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(5, 7, 10, 0.58)',
   },
-  footerBrand: {
-    color: UI.textMuted,
+  mapEditBadgeText: {
+    color: '#FFFFFF',
     fontSize: 10,
-    marginTop: 4,
-  },
-  compassButton: {
-    marginLeft: 'auto',
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(5, 7, 10, 0.34)',
-    borderWidth: 1,
-    borderColor: UI.border,
-    shadowOpacity: 0.45,
-    shadowRadius: 15,
-    shadowOffset: { width: 0, height: 0 },
-  },
-  inputPanel: {
-    marginTop: 18,
-    borderRadius: 22,
-    padding: 14,
-    backgroundColor: UI.panel,
-    borderWidth: 1,
-    borderColor: UI.border,
-  },
-  inputHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  },
-  inputTitle: {
-    color: UI.text,
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  inputCount: {
-    color: UI.textMuted,
-    fontSize: 12,
     fontWeight: '800',
   },
-  diaryInput: {
-    minHeight: 98,
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    color: UI.text,
-    backgroundColor: 'rgba(5, 7, 10, 0.46)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 201, 184, 0.14)',
-    fontSize: 15,
-    lineHeight: 22,
-    textAlignVertical: 'top',
-  },
-  tagScroller: {
-    paddingTop: 10,
-    gap: 8,
-  },
-  emotionTag: {
-    minHeight: 34,
-    borderRadius: 17,
-    paddingHorizontal: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: UI.border,
-    backgroundColor: UI.panelSoft,
-  },
-  emotionTagText: {
-    color: UI.textSoft,
-    fontSize: 12,
-    fontWeight: '800',
-  },
-  actionRow: {
-    marginTop: 16,
+  musicSummaryRow: {
+    top: '77.2%',
+    height: '5.6%',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 9,
   },
-  secondaryAction: {
-    minHeight: 54,
-    minWidth: 96,
-    borderRadius: 27,
-    paddingHorizontal: 13,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(255, 201, 184, 0.06)',
+  summaryArtworkStack: {
+    width: 102,
+    height: 50,
+    position: 'relative',
+  },
+  summaryArtwork: {
+    position: 'absolute',
+    top: 0,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
     borderWidth: 1,
-    borderColor: UI.border,
+    backgroundColor: '#EFE6D6',
   },
-  secondaryActionWide: {
-    minHeight: 54,
-    minWidth: 136,
-    borderRadius: 27,
-    paddingHorizontal: 13,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(255, 201, 184, 0.06)',
-    borderWidth: 1,
-    borderColor: UI.border,
-  },
-  secondaryActionText: {
-    color: UI.peach,
-    fontSize: 14,
-    fontWeight: '900',
-  },
-  primaryAction: {
+  musicSummaryTextBlock: {
     flex: 1,
-    minHeight: 54,
-    borderRadius: 27,
-    paddingHorizontal: 13,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
+    minWidth: 0,
+    paddingLeft: 6,
   },
-  primaryActionText: {
-    color: '#211817',
-    fontSize: 14,
+  summaryTitle: {
+    color: UI.receiptText,
+    fontSize: 15,
     fontWeight: '900',
+  },
+  summarySubtitle: {
+    color: UI.receiptMuted,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: '700',
+    marginTop: 4,
   },
 });
